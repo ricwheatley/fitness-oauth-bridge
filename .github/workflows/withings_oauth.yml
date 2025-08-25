@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       code:
-        description: "Paste the ?code=... you got after approving the app (leave blank to generate the authorisation URL)"
+        description: "Paste the ?code=... from your redirect page (leave blank to generate the auth URL)"
+        required: false
+        default: ""
+      override_redirect:
+        description: "Optional: override redirect URI (must exactly match the Withings app setting)"
         required: false
         default: ""
 
@@ -15,31 +19,61 @@ jobs:
   oauth:
     runs-on: ubuntu-latest
     steps:
-      - name: Show Authorisation URL or Exchange Code
+      - name: Resolve secrets and inputs
+        id: resolve
         env:
           CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
           REDIRECT_URI: ${{ secrets.WITHINGS_REDIRECT_URI }}
-          CODE: ${{ github.event.inputs.code }}
+          OVERRIDE_REDIRECT: ${{ github.event.inputs.override_redirect }}
         run: |
           set -euo pipefail
-
           if [ -z "${CLIENT_ID}" ] || [ -z "${CLIENT_SECRET}" ] || [ -z "${REDIRECT_URI}" ]; then
-            echo "❌ Missing one or more secrets: WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET, WITHINGS_REDIRECT_URI"
+            echo "Missing secrets. Need WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET, WITHINGS_REDIRECT_URI" >&2
             exit 1
           fi
+          # If user provided an override in the run UI, prefer it
+          if [ -n "${OVERRIDE_REDIRECT}" ]; then
+            REDIRECT_URI="${OVERRIDE_REDIRECT}"
+          fi
+          echo "client_id_masked=$(printf '%s' "$CLIENT_ID" | sed 's/^\(.............\).*/\1…/')" >> "$GITHUB_OUTPUT"
+          echo "redirect_uri_raw=$REDIRECT_URI" >> "$GITHUB_OUTPUT"
+          # URL-encode the redirect
+          enc=$(python3 - << 'PY'
+import urllib.parse, os
+print(urllib.parse.quote(os.environ["REDIRECT_URI"], safe=""))
+PY
+)
+          echo "redirect_uri_enc=$enc" >> "$GITHUB_OUTPUT"
+
+      - name: Show Authorisation URL or Exchange Code
+        env:
+          CLIENT_ID_MASKED: ${{ steps.resolve.outputs.client_id_masked }}
+          REDIRECT_URI_RAW:  ${{ steps.resolve.outputs.redirect_uri_raw }}
+          REDIRECT_URI_ENC:  ${{ steps.resolve.outputs.redirect_uri_enc }}
+          CODE:              ${{ github.event.inputs.code }}
+          CLIENT_ID:         ${{ secrets.WITHINGS_CLIENT_ID }}
+          CLIENT_SECRET:     ${{ secrets.WITHINGS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          SCOPE_ENC="user.metrics%20user.activity%20user.info"
+          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=${SCOPE_ENC}&redirect_uri=${REDIRECT_URI_ENC}"
 
           if [ -z "${CODE}" ]; then
-            AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=user.metrics,user.activity,user.info&redirect_uri=${REDIRECT_URI}"
             {
               echo "## Withings Authorisation"
               echo ""
-              echo "Click this link on your phone, log in to Withings, and approve access:"
+              echo "- Client ID: \`${CLIENT_ID_MASKED}\`"
+              echo "- Redirect URI (exact): \`${REDIRECT_URI_RAW}\`"
+              echo ""
+              echo "Tap this link to authorise:"
               echo ""
               echo "<a href=\"${AUTH_URL}\">${AUTH_URL}</a>"
               echo ""
-              echo "After approving, you'll land on your GitHub Pages redirect page which shows the **code**."
-              echo "Re-run this workflow and paste that code into the input box."
+              echo "After approving, your redirect page shows a **code**."
+              echo "Re-run this workflow and paste that code into the input."
+              echo ""
+              echo "> Tip: any change to the redirect URI, including a trailing slash, must be reflected both in Withings app settings and here."
             } >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
@@ -54,14 +88,17 @@ jobs:
             --data-urlencode "client_id=${CLIENT_ID}" \
             --data-urlencode "client_secret=${CLIENT_SECRET}" \
             --data-urlencode "code=${CODE}" \
-            --data-urlencode "redirect_uri=${REDIRECT_URI}")
+            --data-urlencode "redirect_uri=${REDIRECT_URI_RAW}")
 
-          STATUS=$(echo "$RESP" | jq -r '.status')
+          STATUS=$(echo "$RESP" | jq -r '.status // empty')
           if [ "$STATUS" != "0" ]; then
             {
               echo "## Exchange Failed"
               echo ""
-              echo "Response:"
+              echo "- Redirect used (must match authorise step exactly): \`${REDIRECT_URI_RAW}\`"
+              echo "- Did you reuse a code? Codes are single-use."
+              echo ""
+              echo "**Raw response:**"
               echo ""
               echo '```json'
               echo "$RESP"
@@ -75,7 +112,7 @@ jobs:
           EXPIRES=$(echo "$RESP" | jq -r '.body.expires_in')
 
           {
-            echo "## Success - Save Your Refresh Token"
+            echo "## ✅ Success - Save Your Refresh Token"
             echo ""
             echo "**WITHINGS_REFRESH_TOKEN:**"
             echo ""
@@ -83,8 +120,8 @@ jobs:
             echo "${REFRESH}"
             echo '```'
             echo ""
-            echo "Now add this as a GitHub Actions secret named **WITHINGS_REFRESH_TOKEN**."
+            echo "Add it as a repository secret named **WITHINGS_REFRESH_TOKEN**."
             echo ""
-            echo "Optional info:"
-            echo "- Short-lived access token: \`${ACCESS:0:12}...\` (expires in ${EXPIRES}s)"
+            echo "Optional:"
+            echo "- Access token preview: \`${ACCESS:0:12}...\` (expires in ${EXPIRES}s)"
           } >> $GITHUB_STEP_SUMMARY
