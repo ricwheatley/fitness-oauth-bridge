@@ -7,8 +7,12 @@ on:
         description: "Paste the ?code=... from your redirect page (leave blank to generate the auth URL)"
         required: false
         default: ""
+      override_client_id:
+        description: "Optional: paste your Withings CLIENT_ID here to build a clickable link (avoids GitHub secret masking)"
+        required: false
+        default: ""
       override_redirect:
-        description: "Optional: override redirect URI (must exactly match the Withings app setting)"
+        description: "Optional: paste your Redirect URI here, must exactly match Withings app"
         required: false
         default: ""
 
@@ -19,60 +23,90 @@ jobs:
   oauth:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve secrets and inputs
+      - name: Resolve sources
         id: resolve
         shell: bash
         env:
-          CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
-          REDIRECT_URI: ${{ secrets.WITHINGS_REDIRECT_URI }}
-          OVERRIDE_REDIRECT: ${{ github.event.inputs.override_redirect }}
+          # Secrets (used for token exchange, safe to keep)
+          SECRET_CLIENT_ID:     ${{ secrets.WITHINGS_CLIENT_ID }}
+          SECRET_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
+          SECRET_REDIRECT:      ${{ secrets.WITHINGS_REDIRECT_URI }}
+          # Inputs (used to build a clickable link without masking)
+          OVERRIDE_CLIENT_ID:   ${{ github.event.inputs.override_client_id }}
+          OVERRIDE_REDIRECT:    ${{ github.event.inputs.override_redirect }}
         run: |
           set -euo pipefail
 
-          if [ -z "${CLIENT_ID}" ] || [ -z "${CLIENT_SECRET}" ] || [ -z "${REDIRECT_URI}" ]; then
-            echo "Missing secrets. Need WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET, WITHINGS_REDIRECT_URI" >&2
+          # For exchange we still require secrets
+          if [ -z "${SECRET_CLIENT_ID}" ] || [ -z "${SECRET_CLIENT_SECRET}" ]; then
+            echo "Missing secrets WITHINGS_CLIENT_ID / WITHINGS_CLIENT_SECRET" >&2
             exit 1
           fi
-
-          # Use override if provided
+          REDIRECT_FOR_EXCHANGE="${SECRET_REDIRECT}"
+          if [ -z "${REDIRECT_FOR_EXCHANGE}" ] && [ -z "${OVERRIDE_REDIRECT}" ]; then
+            echo "No redirect found. Set WITHINGS_REDIRECT_URI secret or provide override_redirect input." >&2
+            exit 1
+          fi
           if [ -n "${OVERRIDE_REDIRECT}" ]; then
-            REDIRECT_URI="${OVERRIDE_REDIRECT}"
+            REDIRECT_FOR_EXCHANGE="${OVERRIDE_REDIRECT}"
           fi
 
-          # Masked preview of client id
-          CLIENT_ID_MASKED="${CLIENT_ID:0:12}…"
+          # For the clickable link we prefer overrides to avoid GitHub masking *** in href
+          LINK_CLIENT_ID="${OVERRIDE_CLIENT_ID:-$SECRET_CLIENT_ID}"
+          LINK_REDIRECT="${OVERRIDE_REDIRECT:-$SECRET_REDIRECT}"
 
-          # URL-encode redirect using a tiny Python one-liner (no heredoc)
-          REDIRECT_URI_ENC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['REDIRECT_URI'], safe=''))")"
+          # URL-encode the redirect for the link
+          REDIRECT_ENC="$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['LINK_REDIRECT'], safe=''))" \
+            LINK_REDIRECT="$LINK_REDIRECT")" || REDIRECT_ENC=""
 
           {
-            echo "client_id_masked=${CLIENT_ID_MASKED}"
-            echo "redirect_uri_raw=${REDIRECT_URI}"
-            echo "redirect_uri_enc=${REDIRECT_URI_ENC}"
+            echo "link_client_id=$LINK_CLIENT_ID"
+            echo "link_redirect_raw=$LINK_REDIRECT"
+            echo "link_redirect_enc=$REDIRECT_ENC"
+            echo "secret_client_id_masked=${SECRET_CLIENT_ID:0:12}…"
+            echo "redirect_for_exchange=$REDIRECT_FOR_EXCHANGE"
           } >> "$GITHUB_OUTPUT"
 
       - name: Show Authorisation URL or Exchange Code
         shell: bash
         env:
-          CLIENT_ID:         ${{ secrets.WITHINGS_CLIENT_ID }}
-          CLIENT_SECRET:     ${{ secrets.WITHINGS_CLIENT_SECRET }}
-          REDIRECT_URI_RAW:  ${{ steps.resolve.outputs.redirect_uri_raw }}
-          REDIRECT_URI_ENC:  ${{ steps.resolve.outputs.redirect_uri_enc }}
-          CLIENT_ID_MASKED:  ${{ steps.resolve.outputs.client_id_masked }}
-          CODE:              ${{ github.event.inputs.code }}
+          # Link construction (unmasked if provided via inputs)
+          LINK_CLIENT_ID:      ${{ steps.resolve.outputs.link_client_id }}
+          LINK_REDIRECT_RAW:   ${{ steps.resolve.outputs.link_redirect_raw }}
+          LINK_REDIRECT_ENC:   ${{ steps.resolve.outputs.link_redirect_enc }}
+          # Secrets for exchange
+          SECRET_CLIENT_ID:     ${{ secrets.WITHINGS_CLIENT_ID }}
+          SECRET_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
+          REDIRECT_FOR_EXCHANGE:${{ steps.resolve.outputs.redirect_for_exchange }}
+          CODE:                 ${{ github.event.inputs.code }}
+          SECRET_ID_MASKED:     ${{ steps.resolve.outputs.secret_client_id_masked }}
         run: |
           set -euo pipefail
-
           SCOPE_ENC="user.metrics%20user.activity%20user.info"
-          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=${SCOPE_ENC}&redirect_uri=${REDIRECT_URI_ENC}"
 
           if [ -z "${CODE}" ]; then
+            # Build clickable link using overrides (so GitHub doesn't mask with ***)
+            if [ -z "${LINK_CLIENT_ID}" ] || [ -z "${LINK_REDIRECT_ENC}" ]; then
+              {
+                echo "## Withings Authorisation"
+                echo ""
+                echo "To get a clickable link without GitHub masking, re-run this workflow and fill:"
+                echo "- override_client_id: your Withings client id"
+                echo "- override_redirect:  your redirect uri (exact)"
+                echo ""
+                echo "Alternatively, construct manually using this template (URL-encode the redirect):"
+                echo ""
+                echo "\`https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=<CLIENT_ID>&state=ric_state_123&scope=user.metrics%20user.activity%20user.info&redirect_uri=<ENC_REDIRECT>\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+
+            AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${LINK_CLIENT_ID}&state=ric_state_123&scope=${SCOPE_ENC}&redirect_uri=${LINK_REDIRECT_ENC}"
             {
               echo "## Withings Authorisation"
               echo ""
-              echo "- Client ID: \`${CLIENT_ID_MASKED}\`"
-              echo "- Redirect URI (exact): \`${REDIRECT_URI_RAW}\`"
+              echo "- Client ID (for link): \`${LINK_CLIENT_ID}\`"
+              echo "- Redirect URI (exact): \`${LINK_REDIRECT_RAW}\`"
               echo ""
               echo "Tap this link to authorise:"
               echo ""
@@ -81,7 +115,8 @@ jobs:
               echo "After approving, your redirect page shows a **code**."
               echo "Re-run this workflow and paste that code into the input."
               echo ""
-              echo "> Any change to the redirect URI, including a trailing slash, must match in both Withings and here."
+              echo "> Token exchange uses your stored secrets (client id \`${SECRET_ID_MASKED}\`) and redirect \`${REDIRECT_FOR_EXCHANGE}\`."
+              echo "> Ensure the redirect used here matches the one used for exchange."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -93,18 +128,18 @@ jobs:
           RESP="$(curl -sS -X POST "https://wbsapi.withings.net/v2/oauth2" \
             --data-urlencode "action=requesttoken" \
             --data-urlencode "grant_type=authorization_code" \
-            --data-urlencode "client_id=${CLIENT_ID}" \
-            --data-urlencode "client_secret=${CLIENT_SECRET}" \
+            --data-urlencode "client_id=${SECRET_CLIENT_ID}" \
+            --data-urlencode "client_secret=${SECRET_CLIENT_SECRET}" \
             --data-urlencode "code=${CODE}" \
-            --data-urlencode "redirect_uri=${REDIRECT_URI_RAW}")"
+            --data-urlencode "redirect_uri=${REDIRECT_FOR_EXCHANGE}")"
 
           STATUS="$(echo "$RESP" | jq -r '.status // empty')"
           if [ "$STATUS" != "0" ]; then
             {
               echo "## Exchange Failed"
               echo ""
-              echo "- Redirect used: \`${REDIRECT_URI_RAW}\`"
-              echo "- Common causes: redirect mismatch, reusing a code, code expired."
+              echo "- Redirect used for exchange: \`${REDIRECT_FOR_EXCHANGE}\`"
+              echo "- Common causes: redirect mismatch, reused/expired code."
               echo ""
               echo "**Raw response:**"
               echo ""
