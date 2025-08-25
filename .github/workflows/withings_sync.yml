@@ -1,8 +1,8 @@
-name: Withings Daily Sync
+name: Withings Daily Sync (window rewrite)
 
 on:
   schedule:
-    - cron: "17 4 * * *"   # daily 04:17 UTC
+    - cron: "17 5 * * *"   # daily 05:17 UTC
   workflow_dispatch:
 
 permissions:
@@ -25,161 +25,220 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Run Withings sync (CSV upsert)
+      - name: Pull 45d window, upsert CSVs, rewrite JSON history
         env:
           WITHINGS_CLIENT_ID:     ${{ secrets.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
           WITHINGS_REDIRECT_URI:  ${{ secrets.WITHINGS_REDIRECT_URI }}
           WITHINGS_REFRESH_TOKEN: ${{ secrets.WITHINGS_REFRESH_TOKEN }}
-          WITHINGS_DAYS_BACK: "14"
+          WINDOW_DAYS: "45"
           WEIGHT_CSV: knowledge/weight_log.csv
           ACTIVITY_CSV: knowledge/activity_log.csv
         run: |
           python - << 'PY'
-          import os, csv, requests, sys
-          from datetime import datetime, timedelta, timezone
+          import os, csv, json, requests, sys
           from pathlib import Path
+          from datetime import datetime, timedelta, timezone, date
 
           TOKEN_URL   = "https://wbsapi.withings.net/v2/oauth2"
           MEASURE_URL = "https://wbsapi.withings.net/measure"
           ACT_URL     = "https://wbsapi.withings.net/v2/measure"
 
-          def ts(dt): return int(dt.timestamp())
-          def ymd(d): return d.strftime("%Y-%m-%d")
-
+          def ymd(d: date) -> str: return d.strftime("%Y-%m-%d")
+          def ts_midnight_utc(d: date) -> int:
+              return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
           def ensure_csv(path, header):
               Path(path).parent.mkdir(parents=True, exist_ok=True)
               if not Path(path).exists():
-                  with open(path,"w",newline="",encoding="utf-8") as f:
+                  with open(path, "w", newline="", encoding="utf-8") as f:
                       csv.writer(f).writerow(header)
 
-          def upsert_by_date(path, header, row):
-              ensure_csv(path, header)
-              rows=[]; idx=-1
-              with open(path,"r",newline="",encoding="utf-8") as f:
-                  r=csv.DictReader(f)
-                  for i,x in enumerate(r):
-                      rows.append(x)
-                      if x.get("date")==row.get("date"):
-                          idx=i
-              if idx>=0:
-                  rows[idx].update(row)
-              else:
-                  rows.append(row)
-                  rows.sort(key=lambda x:x.get("date",""))
-              with open(path,"w",newline="",encoding="utf-8") as f:
-                  w=csv.DictWriter(f,fieldnames=header); w.writeheader()
-                  for x in rows: w.writerow({k:x.get(k,"") for k in header})
+          # --- config
+          days = int(os.environ.get("WINDOW_DAYS", "45"))
+          today_utc = datetime.now(timezone.utc).date()
+          start = today_utc - timedelta(days=days-1)  # inclusive window
+          weight_csv = os.environ.get("WEIGHT_CSV","knowledge/weight_log.csv")
+          act_csv    = os.environ.get("ACTIVITY_CSV","knowledge/activity_log.csv")
 
-          cid=os.environ["WITHINGS_CLIENT_ID"]
-          csec=os.environ["WITHINGS_CLIENT_SECRET"]
-          rt  =os.environ["WITHINGS_REFRESH_TOKEN"]
-          days=int(os.environ.get("WITHINGS_DAYS_BACK","14"))
-          weight_csv=os.environ.get("WEIGHT_CSV","knowledge/weight_log.csv")
-          act_csv=os.environ.get("ACTIVITY_CSV","knowledge/activity_log.csv")
-
-          # Refresh token
-          resp=requests.post(TOKEN_URL,data={
+          # --- token refresh
+          resp = requests.post(TOKEN_URL, data={
               "action":"requesttoken","grant_type":"refresh_token",
-              "client_id":cid,"client_secret":csec,"refresh_token":rt
-          },timeout=30).json()
-          if resp.get("status")!=0:
+              "client_id":os.environ["WITHINGS_CLIENT_ID"],
+              "client_secret":os.environ["WITHINGS_CLIENT_SECRET"],
+              "refresh_token":os.environ["WITHINGS_REFRESH_TOKEN"]
+          }, timeout=45).json()
+          if resp.get("status") != 0:
               print("Token refresh failed:", resp); sys.exit(1)
-          access=resp["body"]["access_token"]
+          access = resp["body"]["access_token"]
+          hdr = {"Authorization": f"Bearer {access}"}
 
-          hdr={"Authorization":f"Bearer {access}"}
-          end=datetime.now(timezone.utc).date()
-          start=end - timedelta(days=days)
-
-          # Weight and composition
-          w_hdr=["date","weight_kg","body_fat_pct","muscle_mass_kg","water_pct","source","notes"]
-          ensure_csv(weight_csv,w_hdr)
-          r=requests.get(MEASURE_URL,headers=hdr,params={
-              "action":"getmeas","meastypes":"1,6,76,77","category":1,
-              "startdate":ts(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)),
-              "enddate":ts(datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc))
-          },timeout=30).json()
-          if r.get("status")==0:
-              for grp in r["body"].get("measuregrps",[]):
-                  dt=datetime.fromtimestamp(grp["date"],tz=timezone.utc).date().strftime("%Y-%m-%d")
+          # --- fetch weights (covers weight, fat%, muscle, water)
+          r = requests.get(MEASURE_URL, headers=hdr, params={
+              "action":"getmeas",
+              "meastypes":"1,6,76,77",
+              "category":1,
+              "startdate":ts_midnight_utc(start),
+              "enddate":ts_midnight_utc(today_utc)+86399
+          }, timeout=45).json()
+          weights_by_day = {}
+          if r.get("status") == 0:
+              for g in r.get("body",{}).get("measuregrps",[]):
+                  d = datetime.fromtimestamp(g["date"], tz=timezone.utc).date()
+                  measures = g.get("measures",[])
                   def val(t):
-                      for m in grp.get("measures",[]):
+                      for m in measures:
                           if m.get("type")==t:
                               return m["value"]*(10**m["unit"])
                       return None
-                  row={
-                      "date": dt,
-                      "weight_kg": f'{val(1):.2f}' if (val(1) is not None) else "",
-                      "body_fat_pct": f'{val(6):.2f}' if (val(6) is not None) else "",
-                      "muscle_mass_kg": f'{val(76):.2f}' if (val(76) is not None) else "",
-                      "water_pct": f'{val(77):.2f}' if (val(77) is not None) else "",
-                      "source":"withings","notes":""
+                  weights_by_day[ymd(d)] = {
+                      "weight_kg": f"{val(1):.2f}" if val(1) is not None else None,
+                      "body_fat_pct": f"{val(6):.2f}" if val(6) is not None else None,
+                      "muscle_mass_kg": f"{val(76):.2f}" if val(76) is not None else None,
+                      "water_pct": f"{val(77):.2f}" if val(77) is not None else None,
                   }
-                  upsert_by_date(weight_csv,w_hdr,row)
 
-          # Daily activity
-          a_hdr=["date","steps","exercise_minutes","avg_hr_bpm","resting_hr_bpm","calories_out","workout_type","workout_duration_min","source"]
-          ensure_csv(act_csv,a_hdr)
-          r=requests.get(ACT_URL,headers=hdr,params={
-              "action":"getactivity","startdateymd":ymd(start),"enddateymd":ymd(end)
-          },timeout=30).json()
-          if r.get("status")==0:
-              for a in r["body"].get("activities",[]):
-                  row={
-                      "date": a.get("date",""),
+          # --- fetch activity (explicit fields)
+          r = requests.get(ACT_URL, headers=hdr, params={
+              "action":"getactivity",
+              "startdateymd": ymd(start),
+              "enddateymd": ymd(today_utc),
+              "data_fields":"steps,calories,active_minutes,hr_average,hr_min"
+          }, timeout=45).json()
+          acts_by_day = {}
+          if r.get("status") == 0:
+              for a in r.get("body",{}).get("activities",[]) or []:
+                  d = a.get("date")
+                  if not d: continue
+                  acts_by_day[d] = {
+                      "steps": a.get("steps"),
+                      "exercise_minutes": a.get("active_minutes"),
+                      "avg_hr_bpm": a.get("hr_average"),
+                      "resting_hr_bpm": a.get("hr_min"),
+                      "calories_out": a.get("calories"),
+                  }
+
+          # --- upsert CSVs for whole window (overwrite per day)
+          w_hdr = ["date","weight_kg","body_fat_pct","muscle_mass_kg","water_pct","source","notes"]
+          a_hdr = ["date","steps","exercise_minutes","avg_hr_bpm","resting_hr_bpm","calories_out","workout_type","workout_duration_min","source"]
+          ensure_csv(weight_csv, w_hdr)
+          ensure_csv(act_csv, a_hdr)
+
+          # read existing (to preserve outside window if present)
+          def read_csv(path):
+              try:
+                  with open(path, "r", newline="", encoding="utf-8") as f:
+                      return list(csv.DictReader(f))
+              except FileNotFoundError:
+                  return []
+          existing_w = {row["date"]: row for row in read_csv(weight_csv)}
+          existing_a = {row["date"]: row for row in read_csv(act_csv)}
+
+          # rebuild maps for window dates
+          window_dates = [ymd(start + timedelta(days=i)) for i in range(days)]
+          new_w = {}
+          new_a = {}
+
+          for d in window_dates:
+              w = weights_by_day.get(d)
+              a = acts_by_day.get(d)
+              if w:
+                  new_w[d] = {
+                      "date": d,
+                      "weight_kg": w.get("weight_kg") or "",
+                      "body_fat_pct": w.get("body_fat_pct") or "",
+                      "muscle_mass_kg": w.get("muscle_mass_kg") or "",
+                      "water_pct": w.get("water_pct") or "",
+                      "source": "withings",
+                      "notes": ""
+                  }
+              else:
+                  # write a blank line for that date in window to make backfill obvious later
+                  new_w[d] = {
+                      "date": d, "weight_kg":"", "body_fat_pct":"", "muscle_mass_kg":"",
+                      "water_pct":"", "source":"withings", "notes":""
+                  }
+
+              if a:
+                  new_a[d] = {
+                      "date": d,
                       "steps": a.get("steps",""),
-                      "exercise_minutes": a.get("active_minutes", a.get("soft","")),
-                      "avg_hr_bpm": a.get("hr_average",""),
-                      "resting_hr_bpm": a.get("hr_min",""),
-                      "calories_out": a.get("calories",""),
+                      "exercise_minutes": a.get("exercise_minutes",""),
+                      "avg_hr_bpm": a.get("avg_hr_bpm",""),
+                      "resting_hr_bpm": a.get("resting_hr_bpm",""),
+                      "calories_out": a.get("calories_out",""),
                       "workout_type": "",
                       "workout_duration_min": "",
                       "source":"withings"
                   }
-                  upsert_by_date(act_csv,a_hdr,row)
+              else:
+                  new_a[d] = {
+                      "date": d,
+                      "steps":"", "exercise_minutes":"", "avg_hr_bpm":"", "resting_hr_bpm":"",
+                      "calories_out":"", "workout_type":"", "workout_duration_min":"", "source":"withings"
+                  }
+
+          # merge with any rows outside window
+          for d,row in existing_w.items():
+              if d not in new_w: new_w[d] = row
+          for d,row in existing_a.items():
+              if d not in new_a: new_a[d] = row
+
+          # write CSVs sorted by date
+          def write_csv(path, header, rows_map):
+              rows = [rows_map[d] for d in sorted(rows_map.keys())]
+              with open(path,"w",newline="",encoding="utf-8") as f:
+                  w=csv.DictWriter(f, fieldnames=header); w.writeheader()
+                  for r in rows: w.writerow({k:r.get(k,"") for k in header})
+
+          write_csv(weight_csv, w_hdr, new_w)
+          write_csv(act_csv, a_hdr, new_a)
+
+          # --- build JSON per-day and history index
+          Path("docs/days").mkdir(parents=True, exist_ok=True)
+          history = []
+
+          for d in sorted(window_dates, reverse=True):
+              w = new_w.get(d, {})
+              a = new_a.get(d, {})
+              day = {
+                  "date": d,
+                  "weight_kg": w.get("weight_kg") or None,
+                  "body_fat_pct": w.get("body_fat_pct") or None,
+                  "muscle_mass_kg": w.get("muscle_mass_kg") or None,
+                  "water_pct": w.get("water_pct") or None,
+                  "steps": a.get("steps") or None,
+                  "exercise_minutes": a.get("exercise_minutes") or None,
+                  "avg_hr_bpm": a.get("avg_hr_bpm") or None,
+                  "resting_hr_bpm": a.get("resting_hr_bpm") or None,
+                  "calories_out": a.get("calories_out") or None,
+                  "source": "withings",
+                  # simple flags to spot partials
+                  "is_partial_weight": not bool(w.get("weight_kg")),
+                  "is_partial_activity": not bool(a.get("steps"))
+              }
+              # write per-day JSON (overwrite every run)
+              Path(f"docs/days/{d}.json").write_text(json.dumps(day, ensure_ascii=False, indent=2), encoding="utf-8")
+              history.append(day)
+
+          # latest day with any signal for daily.json
+          latest = next((d for d in history if any([
+              d["weight_kg"], d["steps"], d["calories_out"], d["avg_hr_bpm"]
+          ])), history[0] if history else {"date": ymd(today_utc)})
+
+          # write indexes
+          Path("docs/history.json").write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+          Path("docs/daily.json").write_text(json.dumps(latest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+          print(json.dumps({"daily": latest["date"], "days_emitted": len(history)}))
           PY
 
-      - name: Build daily summary JSON for GitHub Pages
+      - name: Commit CSV and JSON updates
         run: |
-          mkdir -p docs summaries
-          python - << 'PY'
-          import csv, json, pathlib, datetime
-          p_w = pathlib.Path("knowledge/weight_log.csv")
-          p_a = pathlib.Path("knowledge/activity_log.csv")
-
-          def last_row(p):
-              if not p.exists(): return {}
-              with p.open(encoding="utf-8") as f:
-                  rows = list(csv.DictReader(f))
-                  return rows[-1] if rows else {}
-
-          w = last_row(p_w)
-          a = last_row(p_a)
-          today = datetime.date.today().isoformat()
-          out = {
-            "date": today,
-            "weight_kg": w.get("weight_kg"),
-            "body_fat_pct": w.get("body_fat_pct"),
-            "steps": a.get("steps"),
-            "exercise_minutes": a.get("exercise_minutes"),
-            "avg_hr_bpm": a.get("avg_hr_bpm"),
-            "calories_out": a.get("calories_out"),
-            "source": "withings"
-          }
-          pathlib.Path("docs").mkdir(parents=True, exist_ok=True)
-          pathlib.Path("docs/daily.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-          pathlib.Path("summaries").mkdir(parents=True, exist_ok=True)
-          pathlib.Path(f"summaries/{today}.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-          print(json.dumps(out))
-          PY
-
-      - name: Commit CSV and summary updates
-        run: |
-          if [[ -n "$(git status --porcelain knowledge/*.csv docs/daily.json summaries 2>/dev/null || true)" ]]; then
+          if [[ -n "$(git status --porcelain knowledge/*.csv docs 2>/dev/null || true)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add knowledge/*.csv docs/daily.json summaries || true
-            git commit -m "chore: update Withings logs and daily summary"
+            git add knowledge/*.csv docs
+            git commit -m "chore: rewrite 45d JSON history and update CSVs"
             git push
           else
             echo "No changes to commit."
