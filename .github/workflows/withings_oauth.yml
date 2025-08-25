@@ -8,7 +8,7 @@ on:
         required: false
         default: ""
       code:
-        description: "(Optional) Paste just the ?code=... If redirect_url is provided, this is ignored."
+        description: "Optional: paste just the code value (ignored if redirect_url is provided)"
         required: false
         default: ""
 
@@ -37,42 +37,47 @@ jobs:
             echo "Redirect must start with http/https. Got: $REDIRECT_RAW" >&2
             exit 1
           fi
-          REDIRECT_ENC="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$REDIRECT_RAW")"
-          {
-            echo "client_id=$VAR_CLIENT_ID"
-            echo "redirect_raw=$REDIRECT_RAW"
-            echo "redirect_enc=$REDIRECT_ENC"
-            echo "client_secret_set=$([ -n "$VAR_CLIENT_SECRET" ] && echo yes || echo no)"
-            echo "client_secret=$VAR_CLIENT_SECRET"
-          } >> "$GITHUB_OUTPUT"
+          REDIRECT_ENC="$(python3 - <<PY
+import urllib.parse, sys
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+ "$REDIRECT_RAW")"
+          echo "client_id=$VAR_CLIENT_ID" >> "$GITHUB_OUTPUT"
+          echo "redirect_raw=$REDIRECT_RAW" >> "$GITHUB_OUTPUT"
+          echo "redirect_enc=$REDIRECT_ENC" >> "$GITHUB_OUTPUT"
+          if [ -n "$VAR_CLIENT_SECRET" ]; then
+            echo "client_secret_set=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "client_secret_set=no" >> "$GITHUB_OUTPUT"
+          fi
+          echo "client_secret=$VAR_CLIENT_SECRET" >> "$GITHUB_OUTPUT"
 
-      - name: Authorise or Exchange (vars only, robust)
+      - name: Authorise or Exchange (vars only)
         shell: bash
         env:
-          REDIRECT_URL_RAW:  ${{ github.event.inputs.redirect_url }}
-          CODE_RAW_INPUT:    ${{ github.event.inputs.code }}
-          CLIENT_ID:         ${{ steps.res.outputs.client_id }}
-          REDIRECT_RAW:      ${{ steps.res.outputs.redirect_raw }}
-          REDIRECT_ENC:      ${{ steps.res.outputs.redirect_enc }}
-          CLIENT_SECRET:     ${{ steps.res.outputs.client_secret }}
-          SECRET_SET:        ${{ steps.res.outputs.client_secret_set }}
+          REDIRECT_URL_RAW: ${{ github.event.inputs.redirect_url }}
+          CODE_RAW_INPUT:   ${{ github.event.inputs.code }}
+          CLIENT_ID:        ${{ steps.res.outputs.client_id }}
+          REDIRECT_RAW:     ${{ steps.res.outputs.redirect_raw }}
+          REDIRECT_ENC:     ${{ steps.res.outputs.redirect_enc }}
+          CLIENT_SECRET:    ${{ steps.res.outputs.client_secret }}
+          SECRET_SET:       ${{ steps.res.outputs.client_secret_set }}
         run: |
           set -euo pipefail
-
           SCOPES="user.metrics,user.activity,user.info"
           AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=${SCOPES}&redirect_uri=${REDIRECT_ENC}"
 
           if [ -z "${REDIRECT_URL_RAW}" ] && [ -z "${CODE_RAW_INPUT}" ]; then
             {
               echo "## Withings Authorisation"
-              echo ""
-              echo "- Client ID (link): \`${CLIENT_ID}\`"
-              echo "- Redirect (exact): \`${REDIRECT_RAW}\`"
-              echo "- Scopes: \`${SCOPES}\`"
-              echo ""
-              echo "Tap this link to authorise, then paste the **entire URL** you land on into the 'redirect_url' input when you re-run:"
-              echo ""
-              echo "<a href=\"${AUTH_URL}\">${AUTH_URL}</a>"
+              echo
+              echo "Client ID: ${CLIENT_ID}"
+              echo "Redirect: ${REDIRECT_RAW}"
+              echo "Scopes: ${SCOPES}"
+              echo
+              echo "Tap this link to authorise, then re-run and paste the FULL URL you land on into 'redirect_url':"
+              echo
+              echo "${AUTH_URL}"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -82,30 +87,27 @@ jobs:
             exit 1
           fi
 
-          # Prefer parsing code from full redirect URL
           CODE_PARSED=""
           if [ -n "${REDIRECT_URL_RAW}" ]; then
-            CODE_PARSED="$(python3 - << 'PY'
+            CODE_PARSED="$(python3 - <<PY
 import sys, urllib.parse
-u = sys.stdin.read().strip()
-try:
-    q = urllib.parse.urlparse(u).query
-    params = urllib.parse.parse_qs(q)
-    code = params.get("code", [""])[0]
-    print(code.strip())
-except Exception:
-    print("")
+u=sys.stdin.read().strip()
+q=urllib.parse.urlparse(u).query
+params=urllib.parse.parse_qs(q)
+print((params.get("code",[""])[0]).strip())
 PY
-            <<< "$REDIRECT_URL_RAW")"
+<<< "$REDIRECT_URL_RAW")"
           fi
 
           CODE="${CODE_PARSED}"
           if [ -z "$CODE" ]; then
             CODE="$(printf '%s' "$CODE_RAW_INPUT" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
           fi
-          [ -z "$CODE" ] && { echo "No code found. Paste the full redirect URL or the code."; exit 1; }
+          if [ -z "$CODE" ]; then
+            echo "No code found. Paste the full redirect URL or the code." >&2
+            exit 1
+          fi
 
-          echo "Attempting token exchange…"
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
 
@@ -114,12 +116,12 @@ PY
           HTTP_CODE="$(
             curl -sS -o "$BODY_FILE" -D "$HDR_FILE" -w "%{http_code}" \
               "https://wbsapi.withings.net/v2/oauth2" \
-              --data-urlencode "action=requesttoken" \
-              --data-urlencode "grant_type=authorization_code" \
-              --data-urlencode "client_id=${CLIENT_ID}" \
-              --data-urlencode "client_secret=${CLIENT_SECRET}" \
-              --data-urlencode "code=${CODE}" \
-              --data-urlencode "redirect_uri=${REDIRECT_RAW}"
+              --data-urlencode action=requesttoken \
+              --data-urlencode grant_type=authorization_code \
+              --data-urlencode client_id="${CLIENT_ID}" \
+              --data-urlencode client_secret="${CLIENT_SECRET}" \
+              --data-urlencode code="${CODE}" \
+              --data-urlencode redirect_uri="${REDIRECT_RAW}"
           )" || true
 
           RAW_BODY="$(cat "$BODY_FILE")"
@@ -129,24 +131,18 @@ PY
           if [ "$HTTP_CODE" != "200" ] || [ -z "$STATUS" ] || [ "$STATUS" != "0" ]; then
             {
               echo "## Exchange Failed"
-              echo ""
-              echo "- HTTP status: \`$HTTP_CODE\`"
-              echo "- Redirect used for exchange: \`${REDIRECT_RAW}\`"
-              echo "- Client ID used: \`${CLIENT_ID}\`"
-              echo "- Code pasted: \`${CODE}\`"
-              echo "- Code length: ${#CODE}"
-              echo ""
-              echo "**Response headers:**"
-              echo ""
-              echo '```'
+              echo
+              echo "HTTP status: $HTTP_CODE"
+              echo "Redirect: $REDIRECT_RAW"
+              echo "Client ID: $CLIENT_ID"
+              echo "Code: $CODE"
+              echo "Code length: ${#CODE}"
+              echo
+              echo "Headers:"
               echo "$RAW_HDRS"
-              echo '```'
-              echo ""
-              echo "**Response body (raw):**"
-              echo ""
-              echo '```'
+              echo
+              echo "Body:"
               echo "$RAW_BODY"
-              echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
@@ -156,16 +152,12 @@ PY
           EXPIRES="$(echo "$RAW_BODY" | jq -r '.body.expires_in' 2>/dev/null || echo "")"
 
           {
-            echo "## ✅ Success - Save Your Refresh Token"
-            echo ""
-            echo "- Code exchanged successfully: \`${CODE}\`"
-            echo ""
-            echo "**WITHINGS_REFRESH_TOKEN:**"
-            echo ""
-            echo '```'
-            echo "${REFRESH}"
-            echo '```'
-            echo ""
-            echo "Optional:"
-            echo "- Access token preview: \`${ACCESS:0:12}...\` (expires in ${EXPIRES}s)"
+            echo "## Success - Save Your Refresh Token"
+            echo
+            echo "Code: $CODE"
+            echo
+            echo "WITHINGS_REFRESH_TOKEN:"
+            echo "$REFRESH"
+            echo
+            echo "Access token (preview): ${ACCESS:0:12}... (expires in ${EXPIRES}s)"
           } >> "$GITHUB_STEP_SUMMARY"
