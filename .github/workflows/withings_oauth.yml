@@ -1,4 +1,4 @@
-name: Withings OAuth Helper
+name: Withings OAuth Helper (diagnostic)
 
 on:
   workflow_dispatch:
@@ -17,16 +17,10 @@ permissions:
 jobs:
   oauth:
     runs-on: ubuntu-latest
-
     env:
-      # Public config from Repository Variables (Settings -> Variables -> Actions)
       CLIENT_ID:    ${{ vars.WITHINGS_CLIENT_ID }}
       REDIRECT_URI: ${{ vars.WITHINGS_REDIRECT_URI }}
-
-      # Private credential from Secrets
       CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
-
-      # Inputs
       CODE:   ${{ github.event.inputs.code }}
       SCOPES: ${{ github.event.inputs.scopes }}
 
@@ -51,18 +45,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Default scopes if form left blank
           SCOPES="${SCOPES:-user.metrics,user.activity}"
-
-          # URL-encode the redirect URI
           REDIRECT_ENC="$(python3 -c 'import os,urllib.parse as u; print(u.quote(os.environ["REDIRECT_URI"], safe=""))')"
-
-          # Random state for CSRF protection
           STATE="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-
           AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=${STATE}&scope=${SCOPES}&redirect_uri=${REDIRECT_ENC}"
-
           {
             echo "## Withings authorisation"
             echo
@@ -72,7 +58,7 @@ jobs:
             echo "### Authorisation link"
             echo "${AUTH_URL}"
             echo
-            echo "**Important:** The authorisation code is only valid for roughly 30 seconds. Approve the app, copy the code from your redirect page, then immediately re-run this workflow with the code pasted into the input."
+            echo "**Important:** The authorisation code is only valid for ~30 seconds. Approve the app, copy the code, then immediately re-run this workflow with the code pasted into the input."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Exchange code for refresh token (when CODE is provided)
@@ -88,10 +74,25 @@ jobs:
           fi
 
           sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq >/dev/null
+          sudo apt-get install -y jq coreutils >/dev/null
+
+          # Prove the real secret is loaded without revealing it
+          SECRET_LEN=${#CLIENT_SECRET}
+          SECRET_SHA256=$(printf '%s' "$CLIENT_SECRET" | sha256sum | awk '{print $1}')
+
+          # Show the exact inputs being used (safe diagnostics)
+          {
+            echo "### Diagnostics (safe)"
+            echo "- client_id: \`${CLIENT_ID}\`"
+            echo "- redirect_uri: \`${REDIRECT_URI}\`"
+            echo "- code length: ${#CODE}"
+            echo "- client_secret length: ${SECRET_LEN}"
+            echo "- client_secret sha256: ${SECRET_SHA256}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
           # Perform token exchange against the v2 endpoint
           RESP="$(curl -sS -X POST "https://wbsapi.withings.net/v2/oauth2" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "action=requesttoken" \
             --data-urlencode "grant_type=authorization_code" \
             --data-urlencode "client_id=${CLIENT_ID}" \
@@ -102,13 +103,18 @@ jobs:
           STATUS="$(printf '%s' "$RESP" | jq -r '.status // empty')"
 
           if [ "$STATUS" != "0" ]; then
+            ERRMSG="$(printf '%s' "$RESP" | jq -r '.error // .body.error // empty')"
             {
               echo "## ❌ Token exchange failed"
               echo
+              echo "**status:** ${STATUS}"
+              [ -n "$ERRMSG" ] && echo "**error:** ${ERRMSG}"
+              echo
               echo "Common causes:"
-              echo "- The code expired, re-authorise and paste the new code within ~30 seconds."
-              echo "- Redirect URI mismatch, it must match exactly what is registered in Withings, including protocol and trailing slash."
+              echo "- Code expired, re-authorise and paste the new code within ~30 seconds."
+              echo "- Redirect URI mismatch, it must match *exactly* what is registered in Withings, including protocol and trailing slash."
               echo "- Restricted scope, remove 'user.info' unless you have an SDK contract."
+              echo "- Client ID or secret typo."
               echo
               echo "### Raw response"
               echo '```json'
@@ -130,5 +136,5 @@ jobs:
             printf '%s\n' "$REFRESH_TOKEN"
             echo '```'
             echo
-            echo "_Access token preview:_ expires in ${EXPIRES_IN}s. For automation, prefer using the refresh token in your daily sync workflow."
+            echo "_Access token preview:_ expires in ${EXPIRES_IN}s."
           } >> "$GITHUB_STEP_SUMMARY"
