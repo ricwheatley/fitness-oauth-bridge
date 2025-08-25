@@ -77,7 +77,7 @@ jobs:
           # Secrets for exchange
           SECRET_CLIENT_ID:     ${{ secrets.WITHINGS_CLIENT_ID }}
           SECRET_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
-          REDIRECT_FOR_EXCHANGE:${{ steps.resolve.outputs.redirect_for_exchange }}
+          REDIRECT_FOR_EXCHANGE: ${{ steps.resolve.outputs.redirect_for_exchange }}
           CODE:                 ${{ github.event.inputs.code }}
           SECRET_ID_MASKED:     ${{ steps.resolve.outputs.secret_client_id_masked }}
         run: |
