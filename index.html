@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Withings OAuth Redirect</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    .card { max-width: 780px; padding: 1.5rem; border: 1px solid #e5e7eb; border-radius: 12px; box-shadow: 0 1px 8px rgba(0,0,0,.05); }
+    code, textarea { width: 100%; }
+    textarea { height: 8rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Withings OAuth Redirect</h1>
+    <p>If you see a code below, copy it and paste it into your setup script when prompted.</p>
+    <h3>Authorisation Code</h3>
+    <textarea id="codeBox" readonly></textarea>
+    <p id="status"></p>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const box = document.getElementById('codeBox');
+    const status = document.getElementById('status');
+    if (code) {
+      box.value = code;
+      box.select(); document.execCommand('copy');
+      status.textContent = "Code copied to your clipboard. Paste it into the setup script.";
+    } else {
+      status.textContent = "No ?code=... found in the URL. Did you approve the app?";
+    }
+  </script>
+</body>
+</html>
