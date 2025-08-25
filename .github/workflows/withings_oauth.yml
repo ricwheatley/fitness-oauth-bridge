@@ -1,0 +1,90 @@
+name: Withings OAuth Helper
+
+on:
+  workflow_dispatch:
+    inputs:
+      code:
+        description: "Paste the ?code=... you got after approving the app (leave blank to generate the authorisation URL)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  oauth:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show Authorisation URL or Exchange Code
+        env:
+          CLIENT_ID: ${{ secrets.WITHINGS_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
+          REDIRECT_URI: ${{ secrets.WITHINGS_REDIRECT_URI }}
+          CODE: ${{ github.event.inputs.code }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CLIENT_ID}" ] || [ -z "${CLIENT_SECRET}" ] || [ -z "${REDIRECT_URI}" ]; then
+            echo "❌ Missing one or more secrets: WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET, WITHINGS_REDIRECT_URI"
+            exit 1
+          fi
+
+          if [ -z "${CODE}" ]; then
+            AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=user.metrics,user.activity,user.info&redirect_uri=${REDIRECT_URI}"
+            {
+              echo "## Withings Authorisation"
+              echo ""
+              echo "Click this link on your phone, log in to Withings, and approve access:"
+              echo ""
+              echo "<a href=\"${AUTH_URL}\">${AUTH_URL}</a>"
+              echo ""
+              echo "After approving, you'll land on your GitHub Pages redirect page which shows the **code**."
+              echo "Re-run this workflow and paste that code into the input box."
+            } >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "Exchanging code for tokens..."
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+
+          RESP=$(curl -sS -X POST "https://wbsapi.withings.net/v2/oauth2" \
+            --data-urlencode "action=requesttoken" \
+            --data-urlencode "grant_type=authorization_code" \
+            --data-urlencode "client_id=${CLIENT_ID}" \
+            --data-urlencode "client_secret=${CLIENT_SECRET}" \
+            --data-urlencode "code=${CODE}" \
+            --data-urlencode "redirect_uri=${REDIRECT_URI}")
+
+          STATUS=$(echo "$RESP" | jq -r '.status')
+          if [ "$STATUS" != "0" ]; then
+            {
+              echo "## Exchange Failed"
+              echo ""
+              echo "Response:"
+              echo ""
+              echo '```json'
+              echo "$RESP"
+              echo '```'
+            } >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          REFRESH=$(echo "$RESP" | jq -r '.body.refresh_token')
+          ACCESS=$(echo "$RESP" | jq -r '.body.access_token')
+          EXPIRES=$(echo "$RESP" | jq -r '.body.expires_in')
+
+          {
+            echo "## Success - Save Your Refresh Token"
+            echo ""
+            echo "**WITHINGS_REFRESH_TOKEN:**"
+            echo ""
+            echo '```'
+            echo "${REFRESH}"
+            echo '```'
+            echo ""
+            echo "Now add this as a GitHub Actions secret named **WITHINGS_REFRESH_TOKEN**."
+            echo ""
+            echo "Optional info:"
+            echo "- Short-lived access token: \`${ACCESS:0:12}...\` (expires in ${EXPIRES}s)"
+          } >> $GITHUB_STEP_SUMMARY
