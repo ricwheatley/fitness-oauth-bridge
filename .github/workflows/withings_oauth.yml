@@ -1,4 +1,4 @@
-name: Withings OAuth Helper (Secrets Only)
+name: Withings OAuth Helper
 
 on:
   workflow_dispatch:
@@ -14,11 +14,14 @@ jobs:
   oauth:
     runs-on: ubuntu-latest
     env:
-      # 🔒 All credentials are now pulled securely from secrets
-      CLIENT_ID:     ${{ secrets.WITHINGS_CLIENT_ID }}
+      # ✅ Pull public config from Repository Variables (will not be masked)
+      CLIENT_ID:    ${{ vars.WITHINGS_CLIENT_ID }}
+      REDIRECT_URI: ${{ vars.WITHINGS_REDIRECT_URI }}
+      
+      # 🔒 Pull private credential from encrypted Secrets
       CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
-      REDIRECT_URI:  ${{ secrets.WITHINGS_REDIRECT_URI }}
-      # The code provided by the user in the second run
+      
+      # User input from the workflow form
       CODE: ${{ github.event.inputs.code }}
 
     steps:
@@ -28,43 +31,32 @@ jobs:
           
           # --- Mode 1: Generate the Authorisation Link ---
           if [ -z "$CODE" ]; then
-            # Validate that secrets needed for the link are present
             if [ -z "$CLIENT_ID" ] || [ -z "$REDIRECT_URI" ]; then
-              echo "## ❌ Error: Missing Secrets" > "$GITHUB_STEP_SUMMARY"
-              echo "The secrets \`WITHINGS_CLIENT_ID\` and \`WITHINGS_REDIRECT_URI\` must be set." >> "$GITHUB_STEP_SUMMARY"
+              echo "## ❌ Error: Missing Variables" > "$GITHUB_STEP_SUMMARY"
+              echo "The repository variables \`WITHINGS_CLIENT_ID\` and \`WITHINGS_REDIRECT_URI\` must be set." >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
 
             SCOPES="user.metrics,user.activity,user.info"
-            
-            # This is the trick to bypass secret masking in the logs.
-            # We build a "safe" version of the URL by swapping a character (e.g., 'a' with 'A').
-            # The GitHub runner doesn't recognize this modified string as a secret.
-            # We then pipe the output through `tr` to swap the character back just before it's written to the summary.
-            
-            SAFE_CLIENT_ID=$(echo "$CLIENT_ID" | tr 'a' 'A')
-            SAFE_REDIRECT_URI=$(echo "$REDIRECT_URI" | tr 'h' 'H') # Obfuscate 'https'
-            
-            URL_TEMPLATE="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${SAFE_CLIENT_ID}&state=github_actions&scope=${SCOPES}&redirect_uri=${SAFE_REDIRECT_URI}"
+            REDIRECT_ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$REDIRECT_URI''', safe=''))")
+            AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=github_actions&scope=${SCOPES}&redirect_uri=${REDIRECT_ENC}"
 
-            # Construct the final summary, piping it through `tr` to reverse the changes
             {
               echo "## Withings Authorisation"
               echo ""
-              echo "Tap the link below to authorise the application. You will be redirected to a page showing a \`code\`."
+              echo "Tap the link below to authorise the application."
               echo ""
               echo "### Authorisation Link"
-              echo "<a href=\"${URL_TEMPLATE}\">${URL_TEMPLATE}</a>"
+              echo "<a href=\"${AUTH_URL}\">${AUTH_URL}</a>"
               echo ""
-              echo "**After authorising, re-run this workflow and paste the \`code\` from your browser into the \`code\` input box.**"
-            } | tr 'A' 'a' | tr 'H' 'h' >> "$GITHUB_STEP_SUMMARY"
+              echo "**After authorising, re-run this workflow and paste the \`code\` from your browser into the input box.**"
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           
           # --- Mode 2: Exchange the Code for a Token ---
           echo "Exchanging code for tokens..."
 
-          # Validate that the client secret is also present for the exchange
           if [ -z "$CLIENT_SECRET" ]; then
             echo "## ❌ Error: Missing Secret" > "$GITHUB_STEP_SUMMARY"
             echo "The secret \`WITHINGS_CLIENT_SECRET\` must be set to exchange the token." >> "$GITHUB_STEP_SUMMARY"
@@ -73,7 +65,6 @@ jobs:
 
           sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
           
-          # Make the secure API call using the secrets directly from the environment
           RESP=$(curl -sS -X POST "https://wbsapi.withings.net/v2/oauth2" \
             --data-urlencode "action=requesttoken" \
             --data-urlencode "grant_type=authorization_code" \
@@ -85,8 +76,7 @@ jobs:
           if [ "$(echo "$RESP" | jq -r '.status')" != "0" ]; then
             {
               echo "## ❌ Exchange Failed"
-              echo "The API returned an error. Common causes include an expired/reused code or a mismatch between your secret Redirect URI and the one in your Withings app."
-              echo "**API Response:**"
+              echo "The API returned an error. Check the raw response below for details."
               echo '```json'
               echo "$RESP" | jq .
               echo '```'
@@ -98,7 +88,7 @@ jobs:
           {
             echo "## ✅ Success! Save Your Refresh Token"
             echo ""
-            echo "Store this value as a new repository secret, for example \`WITHINGS_REFRESH_TOKEN\`, to use in your application."
+            echo "Store this value as a new repository secret, for example \`WITHINGS_REFRESH_TOKEN\`."
             echo '```'
             echo "$REFRESH_TOKEN"
             echo '```'
