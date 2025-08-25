@@ -8,7 +8,7 @@ on:
         required: false
         default: ""
       scope:
-        description: "Scopes (comma-separated, e.g. user.metrics,user.activity)"
+        description: "Scopes (comma-separated). Withings expects commas, e.g. user.metrics,user.activity"
         required: false
         default: "user.metrics,user.activity,user.info"
 
@@ -19,7 +19,7 @@ jobs:
   oauth:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve variables
+      - name: Resolve repository variables
         id: res
         shell: bash
         env:
@@ -30,45 +30,51 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "${VAR_CLIENT_ID}" ] || [ -z "${VAR_REDIRECT_URI}" ] || [ -z "${VAR_CLIENT_SECRET}" ]; then
-            echo "Missing variables. Please set all of:
-              - WITHINGS_CLIENT_ID_FOR_URL
-              - WITHINGS_REDIRECT_URI_FOR_URL
-              - WITHINGS_CLIENT_SECRET_FOR_EXCHANGE" >&2
+          # Validate required vars
+          if [ -z "${VAR_CLIENT_ID}" ] || [ -z "${VAR_REDIRECT_URI}" ]; then
+            echo "Client ID or Redirect URI variable missing." >&2
+            echo "Set repo variables:" >&2
+            echo "  WITHINGS_CLIENT_ID_FOR_URL" >&2
+            echo "  WITHINGS_REDIRECT_URI_FOR_URL (e.g. https://ricwheatley.github.io/fitness-oauth-bridge/ )" >&2
             exit 1
           fi
 
-          # Tidy the redirect and validate
+          # Tidy redirect, fix accidental 's://' paste, and validate
           REDIRECT_RAW="$(printf '%s' "$VAR_REDIRECT_URI" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^s:\/\//https:\/\//')"
           if ! echo "$REDIRECT_RAW" | grep -qi '^http'; then
             echo "Redirect must start with http/https. Got: $REDIRECT_RAW" >&2
             exit 1
           fi
 
-          # URL-encode the redirect (safe= empty so everything is encoded)
+          # URL-encode redirect
           REDIRECT_ENC="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$REDIRECT_RAW")"
 
-          echo "client_id=${VAR_CLIENT_ID}"       >> "$GITHUB_OUTPUT"
-          echo "redirect_raw=${REDIRECT_RAW}"     >> "$GITHUB_OUTPUT"
-          echo "redirect_enc=${REDIRECT_ENC}"     >> "$GITHUB_OUTPUT"
-          echo "scope=${VAR_SCOPE}"               >> "$GITHUB_OUTPUT"
-          echo "client_secret=${VAR_CLIENT_SECRET}" >> "$GITHUB_OUTPUT"
+          # Output for next step
+          {
+            echo "client_id=$VAR_CLIENT_ID"
+            echo "redirect_raw=$REDIRECT_RAW"
+            echo "redirect_enc=$REDIRECT_ENC"
+            echo "scope=$VAR_SCOPE"
+            echo "have_secret=$([ -n "$VAR_CLIENT_SECRET" ] && echo yes || echo no)"
+            echo "client_secret=$VAR_CLIENT_SECRET"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Authorise or Exchange (vars only)
         shell: bash
         env:
-          CODE:            ${{ github.event.inputs.code }}
+          CODE_RAW:        ${{ github.event.inputs.code }}
           CLIENT_ID:       ${{ steps.res.outputs.client_id }}
           REDIRECT_RAW:    ${{ steps.res.outputs.redirect_raw }}
           REDIRECT_ENC:    ${{ steps.res.outputs.redirect_enc }}
           SCOPE:           ${{ steps.res.outputs.scope }}
+          HAVE_SECRET:     ${{ steps.res.outputs.have_secret }}
           CLIENT_SECRET:   ${{ steps.res.outputs.client_secret }}
         run: |
           set -euo pipefail
 
           AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=${SCOPE}&redirect_uri=${REDIRECT_ENC}"
 
-          if [ -z "${CODE}" ]; then
+          if [ -z "${CODE_RAW}" ]; then
             {
               echo "## Withings Authorisation"
               echo ""
@@ -80,10 +86,26 @@ jobs:
               echo ""
               echo "<a href=\"${AUTH_URL}\">${AUTH_URL}</a>"
               echo ""
+              if [ "${HAVE_SECRET}" != "yes" ]; then
+                echo "> Note: You haven't set WITHINGS_CLIENT_SECRET_FOR_EXCHANGE yet, so the exchange step will fail until you add it as a repository variable."
+              fi
+              echo ""
               echo "After approving, your redirect page shows a **code**."
-              echo "Re-run this workflow and paste that code into the input."
+              echo "Re-run this workflow immediately and paste that code into the input."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
+          fi
+
+          # Sanitise the pasted code (strip quotes/newlines/spaces)
+          CODE="$(printf '%s' "$CODE_RAW" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+          if [ -z "$CODE" ]; then
+            echo "No code provided after sanitising input." >&2
+            exit 1
+          fi
+
+          if [ "${HAVE_SECRET}" != "yes" ]; then
+            echo "WITHINGS_CLIENT_SECRET_FOR_EXCHANGE variable is required for token exchange." >&2
+            exit 1
           fi
 
           echo "Exchanging code for tokens (vars only)…"
@@ -104,7 +126,9 @@ jobs:
               echo "## Exchange Failed"
               echo ""
               echo "- Redirect used for exchange: \`${REDIRECT_RAW}\`"
-              echo "- Common causes: redirect mismatch, reused/expired code."
+              echo "- Client ID used: \`${CLIENT_ID}\`"
+              echo "- Code length: ${#CODE}"
+              echo "- Common causes: redirect mismatch, reused/expired code, stray whitespace."
               echo ""
               echo "**Raw response:**"
               echo ""
@@ -122,7 +146,7 @@ jobs:
           {
             echo "## ✅ Success - Save Your Refresh Token"
             echo ""
-            echo "**WITHINGS_REFRESH_TOKEN (store this as a *secret* ideally):**"
+            echo "**WITHINGS_REFRESH_TOKEN (store this as a secret ideally):**"
             echo ""
             echo '```'
             echo "${REFRESH}"
