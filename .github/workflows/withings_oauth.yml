@@ -3,8 +3,12 @@ name: Withings OAuth Helper
 on:
   workflow_dispatch:
     inputs:
+      redirect_url:
+        description: "Paste the FULL URL from the address bar after authorising (it contains ?code=...)"
+        required: false
+        default: ""
       code:
-        description: "Paste the ?code=... from your redirect page (leave blank to generate the auth URL)"
+        description: "(Optional) Paste just the ?code=... If redirect_url is provided, this is ignored."
         required: false
         default: ""
 
@@ -25,10 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${VAR_CLIENT_ID}" ] || [ -z "${VAR_REDIRECT_URI}" ]; then
-            echo "Client ID or Redirect URI variable missing." >&2
-            echo "Set repo variables:" >&2
-            echo "  WITHINGS_CLIENT_ID_FOR_URL" >&2
-            echo "  WITHINGS_REDIRECT_URI_FOR_URL (e.g. https://ricwheatley.github.io/fitness-oauth-bridge/ )" >&2
+            echo "Missing repo variables WITHINGS_CLIENT_ID_FOR_URL / WITHINGS_REDIRECT_URI_FOR_URL" >&2
             exit 1
           fi
           REDIRECT_RAW="$(printf '%s' "$VAR_REDIRECT_URI" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^s:\/\//https:\/\//')"
@@ -48,19 +49,20 @@ jobs:
       - name: Authorise or Exchange (vars only, robust)
         shell: bash
         env:
-          CODE_RAW:        ${{ github.event.inputs.code }}
-          CLIENT_ID:       ${{ steps.res.outputs.client_id }}
-          REDIRECT_RAW:    ${{ steps.res.outputs.redirect_raw }}
-          REDIRECT_ENC:    ${{ steps.res.outputs.redirect_enc }}
-          CLIENT_SECRET:   ${{ steps.res.outputs.client_secret }}
-          SECRET_SET:      ${{ steps.res.outputs.client_secret_set }}
+          REDIRECT_URL_RAW:  ${{ github.event.inputs.redirect_url }}
+          CODE_RAW_INPUT:    ${{ github.event.inputs.code }}
+          CLIENT_ID:         ${{ steps.res.outputs.client_id }}
+          REDIRECT_RAW:      ${{ steps.res.outputs.redirect_raw }}
+          REDIRECT_ENC:      ${{ steps.res.outputs.redirect_enc }}
+          CLIENT_SECRET:     ${{ steps.res.outputs.client_secret }}
+          SECRET_SET:        ${{ steps.res.outputs.client_secret_set }}
         run: |
           set -euo pipefail
 
           SCOPES="user.metrics,user.activity,user.info"
           AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=${SCOPES}&redirect_uri=${REDIRECT_ENC}"
 
-          if [ -z "${CODE_RAW}" ]; then
+          if [ -z "${REDIRECT_URL_RAW}" ] && [ -z "${CODE_RAW_INPUT}" ]; then
             {
               echo "## Withings Authorisation"
               echo ""
@@ -68,12 +70,9 @@ jobs:
               echo "- Redirect (exact): \`${REDIRECT_RAW}\`"
               echo "- Scopes: \`${SCOPES}\`"
               echo ""
-              echo "Tap this link to authorise:"
+              echo "Tap this link to authorise, then paste the **entire URL** you land on into the 'redirect_url' input when you re-run:"
               echo ""
               echo "<a href=\"${AUTH_URL}\">${AUTH_URL}</a>"
-              echo ""
-              echo "After approving, your redirect page shows a **code**."
-              echo "Re-run this workflow immediately and paste that code into the input."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -83,18 +82,33 @@ jobs:
             exit 1
           fi
 
-          # Sanitise the pasted code
-          CODE="$(printf '%s' "$CODE_RAW" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-          if [ -z "$CODE" ]; then
-            echo "No code provided after sanitising input." >&2
-            exit 1
+          # Prefer parsing code from full redirect URL
+          CODE_PARSED=""
+          if [ -n "${REDIRECT_URL_RAW}" ]; then
+            CODE_PARSED="$(python3 - << 'PY'
+import sys, urllib.parse
+u = sys.stdin.read().strip()
+try:
+    q = urllib.parse.urlparse(u).query
+    params = urllib.parse.parse_qs(q)
+    code = params.get("code", [""])[0]
+    print(code.strip())
+except Exception:
+    print("")
+PY
+            <<< "$REDIRECT_URL_RAW")"
           fi
 
-          echo "Exchanging code for tokens (vars only)…"
+          CODE="${CODE_PARSED}"
+          if [ -z "$CODE" ]; then
+            CODE="$(printf '%s' "$CODE_RAW_INPUT" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+          fi
+          [ -z "$CODE" ] && { echo "No code found. Paste the full redirect URL or the code."; exit 1; }
+
+          echo "Attempting token exchange…"
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
 
-          # Capture HTTP details safely; never let jq kill the job
           BODY_FILE="$(mktemp)"
           HDR_FILE="$(mktemp)"
           HTTP_CODE="$(
@@ -110,8 +124,6 @@ jobs:
 
           RAW_BODY="$(cat "$BODY_FILE")"
           RAW_HDRS="$(cat "$HDR_FILE")"
-
-          # Try to parse JSON, but don't crash if it isn't JSON
           STATUS="$(echo "$RAW_BODY" | jq -r '.status // empty' 2>/dev/null || echo "")"
 
           if [ "$HTTP_CODE" != "200" ] || [ -z "$STATUS" ] || [ "$STATUS" != "0" ]; then
@@ -135,13 +147,10 @@ jobs:
               echo '```'
               echo "$RAW_BODY"
               echo '```'
-              echo ""
-              echo "_Common causes: redirect mismatch, reused/expired code, scope not enabled, or temporary Withings outage._"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-          # Success path
           REFRESH="$(echo "$RAW_BODY" | jq -r '.body.refresh_token' 2>/dev/null || echo "")"
           ACCESS="$(echo "$RAW_BODY" | jq -r '.body.access_token' 2>/dev/null || echo "")"
           EXPIRES="$(echo "$RAW_BODY" | jq -r '.body.expires_in' 2>/dev/null || echo "")"
@@ -151,7 +160,7 @@ jobs:
             echo ""
             echo "- Code exchanged successfully: \`${CODE}\`"
             echo ""
-            echo "**WITHINGS_REFRESH_TOKEN (store this as a secret ideally):**"
+            echo "**WITHINGS_REFRESH_TOKEN:**"
             echo ""
             echo '```'
             echo "${REFRESH}"
