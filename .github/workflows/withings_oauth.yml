@@ -7,7 +7,7 @@ on:
         description: "Leave blank to generate the authorisation link. Paste the short-lived code here to exchange it for a refresh token."
         required: false
       scopes:
-        description: "Optional, comma-separated scopes. Default is user.metrics,user.activity. Do not include user.info unless you have an SDK contract."
+        description: "Optional comma-separated scopes. Default: user.metrics,user.activity. Do not include user.info unless you have an SDK contract."
         required: false
         default: "user.metrics,user.activity"
 
@@ -20,14 +20,13 @@ jobs:
 
     env:
       # Public config from Repository Variables (Settings → Variables → Actions)
-      # Set BOTH of these as Variables, not Secrets.
       CLIENT_ID:    ${{ vars.WITHINGS_CLIENT_ID }}
       REDIRECT_URI: ${{ vars.WITHINGS_REDIRECT_URI }}
 
-      # Private credential from encrypted Secrets
+      # Private credential from Secrets
       CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
 
-      # Inputs from the workflow form
+      # Inputs
       CODE:   ${{ github.event.inputs.code }}
       SCOPES: ${{ github.event.inputs.scopes }}
 
@@ -36,17 +35,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           if [[ -z "${CLIENT_ID:-}" || -z "${REDIRECT_URI:-}" ]]; then
             echo "## ❌ Missing repository Variables" > "$GITHUB_STEP_SUMMARY"
-            echo "- WITHINGS_CLIENT_ID and WITHINGS_REDIRECT_URI must be set under Settings → Variables → Actions." >> "$GITHUB_STEP_SUMMARY"
-            echo "- CLIENT_SECRET must be set as a Secret named WITHINGS_CLIENT_SECRET." >> "$GITHUB_STEP_SUMMARY"
+            echo "- Set WITHINGS_CLIENT_ID and WITHINGS_REDIRECT_URI under Settings → Variables → Actions (Variables, not Secrets)." >> "$GITHUB_STEP_SUMMARY"
+            echo "- Set WITHINGS_CLIENT_SECRET under Settings → Secrets and variables → Actions → Secrets." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-          # Guard against using restricted user.info scope without a contract
+          # Soft warning if a restricted scope is requested
           if [[ "${SCOPES,,}" == *"user.info"* ]]; then
             echo "## ⚠️ Scope check" >> "$GITHUB_STEP_SUMMARY"
-            echo "The 'user.info' scope is restricted and generally fails without an SDK contract. Consider removing it." >> "$GITHUB_STEP_SUMMARY"
+            echo "The 'user.info' scope is restricted and typically fails without an SDK contract. Consider removing it." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Generate authorisation link (when CODE is empty)
@@ -83,7 +83,7 @@ PY
             echo "### Authorisation link"
             echo "${AUTH_URL}"
             echo ""
-            echo "**Important:** Withings returns a code that is valid for roughly 30 seconds. Approve the app, copy the \`code\` from your GitHub Pages redirect screen, then immediately re-run this workflow and paste the code into the input."
+            echo "**Important:** The code Withings returns is only valid for roughly 30 seconds. Approve the app, copy the code from your redirect page, then immediately re-run this workflow with the code pasted into the input."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Exchange code for refresh token (when CODE is provided)
@@ -118,7 +118,7 @@ PY
               echo ""
               echo "Common causes:"
               echo "- The code expired, re-authorise and paste the new code within ~30 seconds."
-              echo "- Redirect URI mismatch, the exact URL must match what is registered in Withings, including protocol and trailing slash."
+              echo "- Redirect URI mismatch, it must match exactly what is registered in Withings, including protocol and trailing slash."
               echo "- Restricted scope, remove 'user.info' unless you have an SDK contract."
               echo ""
               echo "### Raw response"
@@ -130,7 +130,6 @@ PY
           fi
 
           REFRESH_TOKEN=$(echo "$RESP" | jq -r '.body.refresh_token // empty')
-          ACCESS_TOKEN=$(echo "$RESP" | jq -r '.body.access_token // empty')
           EXPIRES_IN=$(echo "$RESP" | jq -r '.body.expires_in // empty')
 
           {
