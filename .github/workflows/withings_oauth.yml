@@ -10,7 +10,7 @@ on:
       scope:
         description: "Scopes (comma-separated, e.g. user.metrics,user.activity)"
         required: false
-        default: "user.metrics,user.activity"
+        default: "user.metrics,user.activity,user.info"
 
 permissions:
   contents: read
