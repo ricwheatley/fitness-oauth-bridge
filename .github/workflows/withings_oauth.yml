@@ -4,8 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       code:
-        description: "Leave blank for auth link. Paste the code here to get your token."
+        description: "Leave blank to generate the authorisation link. Paste the short-lived code here to exchange it for a refresh token."
         required: false
+      scopes:
+        description: "Optional, comma-separated scopes. Default is user.metrics,user.activity. Do not include user.info unless you have an SDK contract."
+        required: false
+        default: "user.metrics,user.activity"
 
 permissions:
   contents: read
@@ -13,58 +17,91 @@ permissions:
 jobs:
   oauth:
     runs-on: ubuntu-latest
+
     env:
-      # ✅ Pull public config from Repository Variables (will not be masked)
+      # Public config from Repository Variables (Settings → Variables → Actions)
+      # Set BOTH of these as Variables, not Secrets.
       CLIENT_ID:    ${{ vars.WITHINGS_CLIENT_ID }}
       REDIRECT_URI: ${{ vars.WITHINGS_REDIRECT_URI }}
-      
-      # 🔒 Pull private credential from encrypted Secrets
+
+      # Private credential from encrypted Secrets
       CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
-      
-      # User input from the workflow form
-      CODE: ${{ github.event.inputs.code }}
+
+      # Inputs from the workflow form
+      CODE:   ${{ github.event.inputs.code }}
+      SCOPES: ${{ github.event.inputs.scopes }}
 
     steps:
-      - name: Generate Link or Exchange Code
+      - name: Validate configuration
+        shell: bash
         run: |
           set -euo pipefail
-          
-          # --- Mode 1: Generate the Authorisation Link ---
-          if [ -z "$CODE" ]; then
-            if [ -z "$CLIENT_ID" ] || [ -z "$REDIRECT_URI" ]; then
-              echo "## ❌ Error: Missing Variables" > "$GITHUB_STEP_SUMMARY"
-              echo "The repository variables \`WITHINGS_CLIENT_ID\` and \`WITHINGS_REDIRECT_URI\` must be set." >> "$GITHUB_STEP_SUMMARY"
-              exit 1
-            fi
-
-            SCOPES="user.metrics,user.activity,user.info"
-            REDIRECT_ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$REDIRECT_URI''', safe=''))")
-            AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=github_actions&scope=${SCOPES}&redirect_uri=${REDIRECT_ENC}"
-
-            {
-              echo "## Withings Authorisation"
-              echo ""
-              echo "Tap the link below to authorise the application."
-              echo ""
-              echo "### Authorisation Link"
-              echo "<a href=\"${AUTH_URL}\">${AUTH_URL}</a>"
-              echo ""
-              echo "**After authorising, re-run this workflow and paste the \`code\` from your browser into the input box.**"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          
-          # --- Mode 2: Exchange the Code for a Token ---
-          echo "Exchanging code for tokens..."
-
-          if [ -z "$CLIENT_SECRET" ]; then
-            echo "## ❌ Error: Missing Secret" > "$GITHUB_STEP_SUMMARY"
-            echo "The secret \`WITHINGS_CLIENT_SECRET\` must be set to exchange the token." >> "$GITHUB_STEP_SUMMARY"
+          if [[ -z "${CLIENT_ID:-}" || -z "${REDIRECT_URI:-}" ]]; then
+            echo "## ❌ Missing repository Variables" > "$GITHUB_STEP_SUMMARY"
+            echo "- WITHINGS_CLIENT_ID and WITHINGS_REDIRECT_URI must be set under Settings → Variables → Actions." >> "$GITHUB_STEP_SUMMARY"
+            echo "- CLIENT_SECRET must be set as a Secret named WITHINGS_CLIENT_SECRET." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-          sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
-          
+          # Guard against using restricted user.info scope without a contract
+          if [[ "${SCOPES,,}" == *"user.info"* ]]; then
+            echo "## ⚠️ Scope check" >> "$GITHUB_STEP_SUMMARY"
+            echo "The 'user.info' scope is restricted and generally fails without an SDK contract. Consider removing it." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Generate authorisation link (when CODE is empty)
+        if: ${{ env.CODE == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Default scopes if form left blank
+          SCOPES="${SCOPES:-user.metrics,user.activity}"
+
+          # URL-encode the redirect URI
+          REDIRECT_ENC=$(python3 - <<'PY'
+import urllib.parse, os
+print(urllib.parse.quote(os.environ["REDIRECT_URI"], safe=""))
+PY
+)
+
+          # Random state for CSRF protection
+          STATE=$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)
+
+          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=${STATE}&scope=${SCOPES}&redirect_uri=${REDIRECT_ENC}"
+
+          {
+            echo "## Withings authorisation"
+            echo ""
+            echo "- Scopes: \`${SCOPES}\`"
+            echo "- Redirect URI: \`${REDIRECT_URI}\`"
+            echo ""
+            echo "### Authorisation link"
+            echo "${AUTH_URL}"
+            echo ""
+            echo "**Important:** Withings returns a code that is valid for roughly 30 seconds. Approve the app, copy the \`code\` from your GitHub Pages redirect screen, then immediately re-run this workflow and paste the code into the input."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Exchange code for refresh token (when CODE is provided)
+        if: ${{ env.CODE != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${CLIENT_SECRET:-}" ]]; then
+            echo "## ❌ Missing secret" > "$GITHUB_STEP_SUMMARY"
+            echo "Set WITHINGS_CLIENT_SECRET under Settings → Secrets and variables → Actions → Secrets." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+
+          # Perform token exchange against the v2 endpoint
           RESP=$(curl -sS -X POST "https://wbsapi.withings.net/v2/oauth2" \
             --data-urlencode "action=requesttoken" \
             --data-urlencode "grant_type=authorization_code" \
@@ -72,24 +109,38 @@ jobs:
             --data-urlencode "client_secret=${CLIENT_SECRET}" \
             --data-urlencode "code=${CODE}" \
             --data-urlencode "redirect_uri=${REDIRECT_URI}")
-            
-          if [ "$(echo "$RESP" | jq -r '.status')" != "0" ]; then
+
+          STATUS=$(echo "$RESP" | jq -r '.status // empty')
+
+          if [[ "$STATUS" != "0" ]]; then
             {
-              echo "## ❌ Exchange Failed"
-              echo "The API returned an error. Check the raw response below for details."
+              echo "## ❌ Token exchange failed"
+              echo ""
+              echo "Common causes:"
+              echo "- The code expired, re-authorise and paste the new code within ~30 seconds."
+              echo "- Redirect URI mismatch, the exact URL must match what is registered in Withings, including protocol and trailing slash."
+              echo "- Restricted scope, remove 'user.info' unless you have an SDK contract."
+              echo ""
+              echo "### Raw response"
               echo '```json'
               echo "$RESP" | jq .
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          
-          REFRESH_TOKEN=$(echo "$RESP" | jq -r '.body.refresh_token')
+
+          REFRESH_TOKEN=$(echo "$RESP" | jq -r '.body.refresh_token // empty')
+          ACCESS_TOKEN=$(echo "$RESP" | jq -r '.body.access_token // empty')
+          EXPIRES_IN=$(echo "$RESP" | jq -r '.body.expires_in // empty')
+
           {
-            echo "## ✅ Success! Save Your Refresh Token"
+            echo "## ✅ Success, save your refresh token"
             echo ""
-            echo "Store this value as a new repository secret, for example \`WITHINGS_REFRESH_TOKEN\`."
+            echo "Create or update a Secret named \`WITHINGS_REFRESH_TOKEN\` with the value below."
+            echo ""
             echo '```'
             echo "$REFRESH_TOKEN"
             echo '```'
+            echo ""
+            echo "_Access token preview:_ expires in ${EXPIRES_IN}s. For automation, prefer using the refresh token in your daily sync workflow."
           } >> "$GITHUB_STEP_SUMMARY"
