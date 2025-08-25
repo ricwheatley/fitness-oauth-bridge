@@ -7,10 +7,6 @@ on:
         description: "Paste the ?code=... from your redirect page (leave blank to generate the auth URL)"
         required: false
         default: ""
-      scope:
-        description: "Scopes (comma-separated). Withings expects commas, e.g. user.metrics,user.activity"
-        required: false
-        default: "user.metrics,user.activity,user.info"
 
 permissions:
   contents: read
@@ -26,7 +22,6 @@ jobs:
           VAR_CLIENT_ID:     ${{ vars.WITHINGS_CLIENT_ID_FOR_URL }}
           VAR_REDIRECT_URI:  ${{ vars.WITHINGS_REDIRECT_URI_FOR_URL }}
           VAR_CLIENT_SECRET: ${{ vars.WITHINGS_CLIENT_SECRET_FOR_EXCHANGE }}
-          VAR_SCOPE:         ${{ github.event.inputs.scope }}
         run: |
           set -euo pipefail
 
@@ -40,7 +35,8 @@ jobs:
           fi
 
           # Tidy redirect, fix accidental 's://' paste, and validate
-          REDIRECT_RAW="$(printf '%s' "$VAR_REDIRECT_URI" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^s:\/\//https:\/\//')"
+          REDIRECT_RAW="$(printf '%s' "$VAR_REDIRECT_URI" \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^s:\/\//https:\/\//')"
           if ! echo "$REDIRECT_RAW" | grep -qi '^http'; then
             echo "Redirect must start with http/https. Got: $REDIRECT_RAW" >&2
             exit 1
@@ -49,12 +45,11 @@ jobs:
           # URL-encode redirect
           REDIRECT_ENC="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$REDIRECT_RAW")"
 
-          # Output for next step
+          # Expose to next step
           {
             echo "client_id=$VAR_CLIENT_ID"
             echo "redirect_raw=$REDIRECT_RAW"
             echo "redirect_enc=$REDIRECT_ENC"
-            echo "scope=$VAR_SCOPE"
             echo "have_secret=$([ -n "$VAR_CLIENT_SECRET" ] && echo yes || echo no)"
             echo "client_secret=$VAR_CLIENT_SECRET"
           } >> "$GITHUB_OUTPUT"
@@ -66,13 +61,15 @@ jobs:
           CLIENT_ID:       ${{ steps.res.outputs.client_id }}
           REDIRECT_RAW:    ${{ steps.res.outputs.redirect_raw }}
           REDIRECT_ENC:    ${{ steps.res.outputs.redirect_enc }}
-          SCOPE:           ${{ steps.res.outputs.scope }}
           HAVE_SECRET:     ${{ steps.res.outputs.have_secret }}
           CLIENT_SECRET:   ${{ steps.res.outputs.client_secret }}
         run: |
           set -euo pipefail
 
-          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=${SCOPE}&redirect_uri=${REDIRECT_ENC}"
+          # Withings expects comma-separated scopes
+          SCOPES="user.metrics,user.activity,user.info"
+
+          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=ric_state_123&scope=${SCOPES}&redirect_uri=${REDIRECT_ENC}"
 
           if [ -z "${CODE_RAW}" ]; then
             {
@@ -80,7 +77,7 @@ jobs:
               echo ""
               echo "- Client ID (link): \`${CLIENT_ID}\`"
               echo "- Redirect (exact): \`${REDIRECT_RAW}\`"
-              echo "- Scopes: \`${SCOPE}\`"
+              echo "- Scopes: \`${SCOPES}\`"
               echo ""
               echo "Tap this link to authorise:"
               echo ""
@@ -96,15 +93,15 @@ jobs:
             exit 0
           fi
 
+          if [ "${HAVE_SECRET}" != "yes" ]; then
+            echo "WITHINGS_CLIENT_SECRET_FOR_EXCHANGE variable is required for token exchange." >&2
+            exit 1
+          fi
+
           # Sanitise the pasted code (strip quotes/newlines/spaces)
           CODE="$(printf '%s' "$CODE_RAW" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
           if [ -z "$CODE" ]; then
             echo "No code provided after sanitising input." >&2
-            exit 1
-          fi
-
-          if [ "${HAVE_SECRET}" != "yes" ]; then
-            echo "WITHINGS_CLIENT_SECRET_FOR_EXCHANGE variable is required for token exchange." >&2
             exit 1
           fi
 
@@ -127,8 +124,10 @@ jobs:
               echo ""
               echo "- Redirect used for exchange: \`${REDIRECT_RAW}\`"
               echo "- Client ID used: \`${CLIENT_ID}\`"
+              echo "- Code pasted: \`${CODE}\`"
               echo "- Code length: ${#CODE}"
-              echo "- Common causes: redirect mismatch, reused/expired code, stray whitespace."
+              echo ""
+              echo "- Common causes: redirect mismatch, reused/expired code, stray whitespace, or scope not enabled in the Withings app."
               echo ""
               echo "**Raw response:**"
               echo ""
@@ -145,6 +144,8 @@ jobs:
 
           {
             echo "## ✅ Success - Save Your Refresh Token"
+            echo ""
+            echo "- Code exchanged successfully: \`${CODE}\`"
             echo ""
             echo "**WITHINGS_REFRESH_TOKEN (store this as a secret ideally):**"
             echo ""
