@@ -1,14 +1,18 @@
-name: Withings OAuth Helper
+name: Withings OAuth Helper (vars + secret, with state)
 
 on:
   workflow_dispatch:
     inputs:
       redirect_url:
-        description: "Paste the FULL URL you land on after authorising (contains ?code=...)"
+        description: "Paste the FULL URL you land on after authorising (contains ?code=...&state=...)"
         required: false
         default: ""
       code:
         description: "Optional: paste only the code value (ignored if redirect_url provided)"
+        required: false
+        default: ""
+      state:
+        description: "Optional: state to use in the authorise link (and to validate on return). If empty, we generate one."
         required: false
         default: ""
 
@@ -19,32 +23,42 @@ jobs:
   oauth:
     runs-on: ubuntu-latest
     env:
-      CLIENT_ID:        ${{ vars.WITHINGS_CLIENT_ID }}
-      REDIRECT_URI:     ${{ vars.WITHINGS_REDIRECT_URI }}
-      CLIENT_SECRET:    ${{ secrets.WITHINGS_CLIENT_SECRET }}
-      SCOPES:           user.metrics,user.activity   # keep it simple and allowed
+      CLIENT_ID:     ${{ vars.WITHINGS_CLIENT_ID }}
+      REDIRECT_URI:  ${{ vars.WITHINGS_REDIRECT_URI }}
+      CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
+      SCOPES:        user.metrics,user.activity
     steps:
       - name: Validate variables and secret
         run: |
           set -euo pipefail
           if [ -z "${CLIENT_ID:-}" ] || [ -z "${REDIRECT_URI:-}" ]; then
-            echo "## Missing repository Variables" > "$GITHUB_STEP_SUMMARY"
-            echo "- Set WITHINGS_CLIENT_ID and WITHINGS_REDIRECT_URI under Settings → Actions → Variables." >> "$GITHUB_STEP_SUMMARY"
+            echo "Missing Variables. Set WITHINGS_CLIENT_ID and WITHINGS_REDIRECT_URI under Settings -> Actions -> Variables." > "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           if [ -z "${CLIENT_SECRET:-}" ]; then
-            echo "## Missing repository Secret" > "$GITHUB_STEP_SUMMARY"
-            echo "- Set WITHINGS_CLIENT_SECRET under Settings → Actions → Secrets." >> "$GITHUB_STEP_SUMMARY"
+            echo "Missing Secret. Set WITHINGS_CLIENT_SECRET under Settings -> Actions -> Secrets." > "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          # Tidy redirect (no whitespace, must start http/https)
+          # normalise redirect
           REDIRECT_URI_TRIM=$(printf '%s' "$REDIRECT_URI" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-          if ! echo "$REDIRECT_URI_TRIM" | grep -qi '^http'; then
-            echo "## Redirect looks invalid" > "$GITHUB_STEP_SUMMARY"
-            echo "WITHINGS_REDIRECT_URI must start with http/https. Current: $REDIRECT_URI_TRIM" >> "$GITHUB_STEP_SUMMARY"
+          if ! printf '%s' "$REDIRECT_URI_TRIM" | grep -qi '^http'; then
+            echo "Redirect looks invalid: $REDIRECT_URI_TRIM" > "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           echo "REDIRECT_URI_TRIM=$REDIRECT_URI_TRIM" >> "$GITHUB_ENV"
+
+      - name: Prepare state
+        env:
+          STATE_INPUT: ${{ github.event.inputs.state }}
+        run: |
+          set -euo pipefail
+          # Use provided state, else generate a deterministic one for this run
+          if [ -n "${STATE_INPUT:-}" ]; then
+            STATE="$STATE_INPUT"
+          else
+            STATE="state-${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "STATE=$STATE" >> "$GITHUB_ENV"
 
       - name: Authorise or exchange
         env:
@@ -53,39 +67,54 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Authorise link (Withings expects comma-separated scopes; redirect can be raw here)
-          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&scope=${SCOPES}&redirect_uri=${REDIRECT_URI_TRIM}"
+          # Build authorise link (Withings expects comma-separated scopes)
+          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=${STATE}&scope=${SCOPES}&redirect_uri=${REDIRECT_URI_TRIM}"
 
           if [ -z "${REDIRECT_URL_INPUT}" ] && [ -z "${CODE_INPUT}" ]; then
             {
-              echo "## Withings Authorisation"
+              echo "Withings Authorisation"
               echo
-              echo "Tap this link to authorise your new app (Pete E.), then copy the FULL URL you land on:"
+              echo "1) Tap this link to authorise:"
+              echo "   ${AUTH_URL}"
               echo
-              echo "${AUTH_URL}"
-              echo
-              echo "Next, re-run this workflow and paste that full URL into the 'redirect_url' input."
+              echo "2) After approving, copy the FULL URL you land on and re-run this workflow with that URL in 'redirect_url'."
+              echo "   If you want strict state validation, also pass the same state value back in the 'state' input."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # Extract code from full redirect URL if provided
-          CODE=""
+          # Extract code and returned state if a full URL was provided
+          URL_CODE=""
+          URL_STATE=""
           if [ -n "${REDIRECT_URL_INPUT}" ]; then
-            CODE=$(printf '%s' "$REDIRECT_URL_INPUT" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+            URL_CODE=$(printf '%s' "$REDIRECT_URL_INPUT" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
+            URL_STATE=$(printf '%s' "$REDIRECT_URL_INPUT" | sed -n 's/.*[?&]state=\([^&]*\).*/\1/p')
           fi
-          if [ -z "$CODE" ] && [ -n "${CODE_INPUT}" ]; then
-            CODE=$(printf '%s' "$CODE_INPUT" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-          fi
+
+          CODE="$URL_CODE"
+          [ -z "$CODE" ] && CODE=$(printf '%s' "$CODE_INPUT" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
           if [ -z "$CODE" ]; then
             echo "No code found. Paste the full redirect URL or the code value." >&2
             exit 1
           fi
 
+          # Optional state validation if caller supplied a state input
+          if [ -n "${STATE}" ] && [ -n "$URL_STATE" ]; then
+            if [ "$STATE" != "$URL_STATE" ]; then
+              {
+                echo "State mismatch"
+                echo "Expected: $STATE"
+                echo "Returned: $URL_STATE"
+                echo "You can ignore this and continue, but it usually means the link and exchange were created in separate runs with different generated states. Re-run with a fixed 'state' input if you want strict validation."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
 
-          # Exchange code for tokens (v2 endpoint)
+          # Exchange code for tokens
           BODY_FILE="$(mktemp)"
           HDR_FILE="$(mktemp)"
           HTTP_CODE="$(
@@ -105,19 +134,21 @@ jobs:
 
           if [ "$HTTP_CODE" != "200" ] || [ -z "$STATUS" ] || [ "$STATUS" != "0" ]; then
             {
-              echo "## Token exchange failed"
+              echo "Token exchange failed"
               echo
               echo "HTTP: $HTTP_CODE"
               echo "Client ID: $CLIENT_ID"
               echo "Redirect: $REDIRECT_URI_TRIM"
               echo "Code length: ${#CODE}"
+              echo "State used in link: $STATE"
+              [ -n "$URL_STATE" ] && echo "State returned: $URL_STATE"
               echo
               echo "Raw response:"
               printf '%s\n' "$RAW_BODY" | jq . 2>/dev/null || printf '%s\n' "$RAW_BODY"
               echo
               echo "Hints:"
-              echo "- Codes are single-use and expire quickly. Re-authorise and exchange immediately."
-              echo "- Client secret or environment mismatch will make a fresh code look invalid."
+              echo "- Codes are single-use and expire quickly. Authorise then exchange immediately."
+              echo "- Client secret/env mismatch will make a fresh code look invalid."
               echo "- Redirect must match the app exactly, including trailing slash."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
@@ -127,13 +158,11 @@ jobs:
           EXPIRES_IN="$(printf '%s' "$RAW_BODY" | jq -r '.body.expires_in // empty')"
 
           {
-            echo "## Success – save your refresh token"
+            echo "Success – save your refresh token"
             echo
             echo "Create or update a Secret named WITHINGS_REFRESH_TOKEN with the value below:"
             echo
-            echo '```'
-            printf '%s\n' "$REFRESH_TOKEN"
-            echo '```'
+            echo "$REFRESH_TOKEN"
             echo
             echo "Access token TTL (seconds): ${EXPIRES_IN}"
           } >> "$GITHUB_STEP_SUMMARY"
