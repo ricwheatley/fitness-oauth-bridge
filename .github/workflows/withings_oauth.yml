@@ -1,18 +1,10 @@
-name: Withings OAuth Helper (vars + secret, with state)
+name: Withings OAuth Helper (vars + secret)
 
 on:
   workflow_dispatch:
     inputs:
-      redirect_url:
-        description: "Paste the FULL URL you land on after authorising (contains ?code=...&state=...)"
-        required: false
-        default: ""
       code:
-        description: "Optional: paste only the code value (ignored if redirect_url provided)"
-        required: false
-        default: ""
-      state:
-        description: "Optional: state to use in the authorise link (and to validate on return). If empty, we generate one."
+        description: "Paste the ?code=... from your redirect page (leave blank to generate the auth URL)"
         required: false
         default: ""
 
@@ -22,147 +14,136 @@ permissions:
 jobs:
   oauth:
     runs-on: ubuntu-latest
-    env:
-      CLIENT_ID:     ${{ vars.WITHINGS_CLIENT_ID }}
-      REDIRECT_URI:  ${{ vars.WITHINGS_REDIRECT_URI }}
-      CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
-      SCOPES:        user.metrics,user.activity
     steps:
-      - name: Validate variables and secret
-        run: |
-          set -euo pipefail
-          if [ -z "${CLIENT_ID:-}" ] || [ -z "${REDIRECT_URI:-}" ]; then
-            echo "Missing Variables. Set WITHINGS_CLIENT_ID and WITHINGS_REDIRECT_URI under Settings -> Actions -> Variables." > "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          if [ -z "${CLIENT_SECRET:-}" ]; then
-            echo "Missing Secret. Set WITHINGS_CLIENT_SECRET under Settings -> Actions -> Secrets." > "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          # normalise redirect
-          REDIRECT_URI_TRIM=$(printf '%s' "$REDIRECT_URI" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-          if ! printf '%s' "$REDIRECT_URI_TRIM" | grep -qi '^http'; then
-            echo "Redirect looks invalid: $REDIRECT_URI_TRIM" > "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo "REDIRECT_URI_TRIM=$REDIRECT_URI_TRIM" >> "$GITHUB_ENV"
-
-      - name: Prepare state
+      - name: Resolve repository variables
+        id: res
+        shell: bash
         env:
-          STATE_INPUT: ${{ github.event.inputs.state }}
+          VAR_CLIENT_ID:    ${{ vars.WITHINGS_CLIENT_ID }}
+          VAR_REDIRECT_URI: ${{ vars.WITHINGS_REDIRECT_URI }}
         run: |
           set -euo pipefail
-          # Use provided state, else generate a deterministic one for this run
-          if [ -n "${STATE_INPUT:-}" ]; then
-            STATE="$STATE_INPUT"
-          else
-            STATE="state-${GITHUB_RUN_ID}-${GITHUB_RUN_NUMBER}"
+
+          # Validate required vars
+          if [ -z "${VAR_CLIENT_ID}" ] || [ -z "${VAR_REDIRECT_URI}" ]; then
+            echo "Client ID or Redirect URI variable missing." >&2
+            echo "Set repo variables:" >&2
+            echo "  WITHINGS_CLIENT_ID" >&2
+            echo "  WITHINGS_REDIRECT_URI (e.g. https://ricwheatley.github.io/fitness-oauth-bridge/ )" >&2
+            exit 1
           fi
-          echo "STATE=$STATE" >> "$GITHUB_ENV"
 
-      - name: Authorise or exchange
+          # Tidy redirect, fix accidental 's://' paste, and validate
+          REDIRECT_RAW="$(printf '%s' "$VAR_REDIRECT_URI" \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^s:\/\//https:\/\//')"
+          if ! echo "$REDIRECT_RAW" | grep -qi '^http'; then
+            echo "Redirect must start with http/https. Got: $REDIRECT_RAW" >&2
+            exit 1
+          fi
+
+          # URL-encode redirect
+          REDIRECT_ENC="$(python3 - <<'PY'
+import urllib.parse, sys
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+"$REDIRECT_RAW")"
+
+          # Expose to next step
+          {
+            echo "client_id=$VAR_CLIENT_ID"
+            echo "redirect_raw=$REDIRECT_RAW"
+            echo "redirect_enc=$REDIRECT_ENC"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Authorise or Exchange (vars + secret)
+        shell: bash
         env:
-          REDIRECT_URL_INPUT: ${{ github.event.inputs.redirect_url }}
-          CODE_INPUT:         ${{ github.event.inputs.code }}
+          CODE_RAW:        ${{ github.event.inputs.code }}
+          CLIENT_ID:       ${{ steps.res.outputs.client_id }}
+          REDIRECT_RAW:    ${{ steps.res.outputs.redirect_raw }}
+          REDIRECT_ENC:    ${{ steps.res.outputs.redirect_enc }}
+          CLIENT_SECRET:   ${{ secrets.WITHINGS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
 
-          # Build authorise link (Withings expects comma-separated scopes)
-          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=${STATE}&scope=${SCOPES}&redirect_uri=${REDIRECT_URI_TRIM}"
+          # Ensure secret present
+          if [ -z "${CLIENT_SECRET}" ]; then
+            echo "WITHINGS_CLIENT_SECRET secret is missing (Settings -> Secrets and variables -> Actions -> New repository secret)." >&2
+            exit 1
+          fi
 
-          if [ -z "${REDIRECT_URL_INPUT}" ] && [ -z "${CODE_INPUT}" ]; then
+          # Withings expects comma-separated scopes; include a state
+          SCOPES="user.metrics,user.activity"
+          STATE="ric_state_123"
+
+          AUTH_URL="https://account.withings.com/oauth2_user/authorize2?response_type=code&client_id=${CLIENT_ID}&state=${STATE}&scope=${SCOPES}&redirect_uri=${REDIRECT_ENC}"
+
+          if [ -z "${CODE_RAW}" ]; then
             {
-              echo "Withings Authorisation"
+              echo "## Withings Authorisation"
               echo
-              echo "1) Tap this link to authorise:"
-              echo "   ${AUTH_URL}"
+              echo "- Client ID (link): ${CLIENT_ID}"
+              echo "- Redirect (exact): ${REDIRECT_RAW}"
+              echo "- Scopes: ${SCOPES}"
+              echo "- State: ${STATE}"
               echo
-              echo "2) After approving, copy the FULL URL you land on and re-run this workflow with that URL in 'redirect_url'."
-              echo "   If you want strict state validation, also pass the same state value back in the 'state' input."
+              echo "Tap this link to authorise:"
+              echo
+              echo "${AUTH_URL}"
+              echo
+              echo "After approving, your redirect page shows a ?code=... ."
+              echo "Re-run this workflow immediately and paste that code into the input."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # Extract code and returned state if a full URL was provided
-          URL_CODE=""
-          URL_STATE=""
-          if [ -n "${REDIRECT_URL_INPUT}" ]; then
-            URL_CODE=$(printf '%s' "$REDIRECT_URL_INPUT" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')
-            URL_STATE=$(printf '%s' "$REDIRECT_URL_INPUT" | sed -n 's/.*[?&]state=\([^&]*\).*/\1/p')
-          fi
-
-          CODE="$URL_CODE"
-          [ -z "$CODE" ] && CODE=$(printf '%s' "$CODE_INPUT" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-
+          # Sanitise the pasted code (strip quotes/newlines/spaces)
+          CODE="$(printf '%s' "$CODE_RAW" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
           if [ -z "$CODE" ]; then
-            echo "No code found. Paste the full redirect URL or the code value." >&2
+            echo "No code provided after sanitising input." >&2
             exit 1
           fi
 
-          # Optional state validation if caller supplied a state input
-          if [ -n "${STATE}" ] && [ -n "$URL_STATE" ]; then
-            if [ "$STATE" != "$URL_STATE" ]; then
-              {
-                echo "State mismatch"
-                echo "Expected: $STATE"
-                echo "Returned: $URL_STATE"
-                echo "You can ignore this and continue, but it usually means the link and exchange were created in separate runs with different generated states. Re-run with a fixed 'state' input if you want strict validation."
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
-
+          echo "Exchanging code for tokens…"
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y jq >/dev/null
 
-          # Exchange code for tokens
-          BODY_FILE="$(mktemp)"
-          HDR_FILE="$(mktemp)"
-          HTTP_CODE="$(
-            curl -sS -o "$BODY_FILE" -D "$HDR_FILE" -w "%{http_code}" \
-              "https://wbsapi.withings.net/v2/oauth2" \
-              -H "Content-Type: application/x-www-form-urlencoded" \
-              --data-urlencode action=requesttoken \
-              --data-urlencode grant_type=authorization_code \
-              --data-urlencode client_id="${CLIENT_ID}" \
-              --data-urlencode client_secret="${CLIENT_SECRET}" \
-              --data-urlencode code="${CODE}" \
-              --data-urlencode redirect_uri="${REDIRECT_URI_TRIM}"
-          )" || true
+          RESP="$(curl -sS -X POST "https://wbsapi.withings.net/v2/oauth2" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "action=requesttoken" \
+            --data-urlencode "grant_type=authorization_code" \
+            --data-urlencode "client_id=${CLIENT_ID}" \
+            --data-urlencode "client_secret=${CLIENT_SECRET}" \
+            --data-urlencode "code=${CODE}" \
+            --data-urlencode "redirect_uri=${REDIRECT_RAW}")"
 
-          RAW_BODY="$(cat "$BODY_FILE")"
-          STATUS="$(printf '%s' "$RAW_BODY" | jq -r '.status // empty' 2>/dev/null || echo "")"
-
-          if [ "$HTTP_CODE" != "200" ] || [ -z "$STATUS" ] || [ "$STATUS" != "0" ]; then
+          STATUS="$(echo "$RESP" | jq -r '.status // empty')"
+          if [ "$STATUS" != "0" ]; then
             {
-              echo "Token exchange failed"
+              echo "## Exchange Failed"
               echo
-              echo "HTTP: $HTTP_CODE"
-              echo "Client ID: $CLIENT_ID"
-              echo "Redirect: $REDIRECT_URI_TRIM"
-              echo "Code length: ${#CODE}"
-              echo "State used in link: $STATE"
-              [ -n "$URL_STATE" ] && echo "State returned: $URL_STATE"
+              echo "- Redirect used for exchange: ${REDIRECT_RAW}"
+              echo "- Client ID used: ${CLIENT_ID}"
+              echo "- Code length: ${#CODE}"
+              echo
+              echo "- Common causes: redirect mismatch, reused/expired code, or client secret/env mismatch."
               echo
               echo "Raw response:"
-              printf '%s\n' "$RAW_BODY" | jq . 2>/dev/null || printf '%s\n' "$RAW_BODY"
-              echo
-              echo "Hints:"
-              echo "- Codes are single-use and expire quickly. Authorise then exchange immediately."
-              echo "- Client secret/env mismatch will make a fresh code look invalid."
-              echo "- Redirect must match the app exactly, including trailing slash."
+              echo "$RESP" | jq . 2>/dev/null || echo "$RESP"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-          REFRESH_TOKEN="$(printf '%s' "$RAW_BODY" | jq -r '.body.refresh_token // empty')"
-          EXPIRES_IN="$(printf '%s' "$RAW_BODY" | jq -r '.body.expires_in // empty')"
+          REFRESH="$(echo "$RESP" | jq -r '.body.refresh_token')"
+          ACCESS="$(echo "$RESP" | jq -r '.body.access_token')"
+          EXPIRES="$(echo "$RESP" | jq -r '.body.expires_in')"
 
           {
-            echo "Success – save your refresh token"
+            echo "## ✅ Success - Save Your Refresh Token"
             echo
             echo "Create or update a Secret named WITHINGS_REFRESH_TOKEN with the value below:"
             echo
-            echo "$REFRESH_TOKEN"
+            echo "$REFRESH"
             echo
-            echo "Access token TTL (seconds): ${EXPIRES_IN}"
+            echo "Access token (preview): ${ACCESS:0:12}... (expires in ${EXPIRES}s)"
           } >> "$GITHUB_STEP_SUMMARY"
