@@ -1,4 +1,4 @@
-name: Withings OAuth Helper (vars + secret)
+name: Withings OAuth Helper (vars + secret, no-heredoc)
 
 on:
   workflow_dispatch:
@@ -33,18 +33,18 @@ jobs:
             exit 1
           fi
 
-          # Tidy redirect, fix accidental 's://' paste, and validate
-          REDIRECT_RAW="$(printf '%s' "$VAR_REDIRECT_URI" \
-            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^s:\/\//https:\/\//')"
+          # Tidy redirect and validate
+          REDIRECT_RAW="$(printf '%s' "$VAR_REDIRECT_URI" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^s:\/\//https:\/\//')"
           if ! echo "$REDIRECT_RAW" | grep -qi '^http'; then
             echo "Redirect must start with http/https. Got: $REDIRECT_RAW" >&2
             exit 1
           fi
 
-          # URL-encode redirect
-          REDIRECT_ENC="$(python3 - <<'PY'import urllib.parse, sys print(urllib.parse.quote(sys.argv[1], safe="")) PY "$REDIRECT_RAW")"
+          # URL-encode redirect using jq (no heredoc/python)
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y jq >/dev/null
+          REDIRECT_ENC="$(printf '%s' "$REDIRECT_RAW" | jq -sRr @uri)"
 
-          # Expose to next step
           {
             echo "client_id=$VAR_CLIENT_ID"
             echo "redirect_raw=$REDIRECT_RAW"
@@ -62,13 +62,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Ensure secret present
           if [ -z "${CLIENT_SECRET}" ]; then
             echo "WITHINGS_CLIENT_SECRET secret is missing (Settings -> Secrets and variables -> Actions -> New repository secret)." >&2
             exit 1
           fi
 
-          # Withings expects comma-separated scopes; include a state
+          # Withings expects comma-separated scopes; fixed state
           SCOPES="user.metrics,user.activity"
           STATE="ric_state_123"
 
@@ -78,22 +77,19 @@ jobs:
             {
               echo "## Withings Authorisation"
               echo
-              echo "- Client ID (link): ${CLIENT_ID}"
-              echo "- Redirect (exact): ${REDIRECT_RAW}"
+              echo "- Client ID: ${CLIENT_ID}"
+              echo "- Redirect: ${REDIRECT_RAW}"
               echo "- Scopes: ${SCOPES}"
               echo "- State: ${STATE}"
               echo
-              echo "Tap this link to authorise:"
+              echo "Tap this link to authorise, then re-run with the code pasted below:"
               echo
               echo "${AUTH_URL}"
-              echo
-              echo "After approving, your redirect page shows a ?code=... ."
-              echo "Re-run this workflow immediately and paste that code into the input."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # Sanitise the pasted code (strip quotes/newlines/spaces)
+          # Sanitise code
           CODE="$(printf '%s' "$CODE_RAW" | tr -d '\r' | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
           if [ -z "$CODE" ]; then
             echo "No code provided after sanitising input." >&2
@@ -101,38 +97,37 @@ jobs:
           fi
 
           echo "Exchanging code for tokens…"
-          sudo apt-get update -y >/dev/null
-          sudo apt-get install -y jq >/dev/null
-
           RESP="$(curl -sS -X POST "https://wbsapi.withings.net/v2/oauth2" \
             -H "Content-Type: application/x-www-form-urlencoded" \
-            --data-urlencode "action=requesttoken" \
-            --data-urlencode "grant_type=authorization_code" \
-            --data-urlencode "client_id=${CLIENT_ID}" \
-            --data-urlencode "client_secret=${CLIENT_SECRET}" \
-            --data-urlencode "code=${CODE}" \
-            --data-urlencode "redirect_uri=${REDIRECT_RAW}")"
+            --data-urlencode action=requesttoken \
+            --data-urlencode grant_type=authorization_code \
+            --data-urlencode client_id="${CLIENT_ID}" \
+            --data-urlencode client_secret="${CLIENT_SECRET}" \
+            --data-urlencode code="${CODE}" \
+            --data-urlencode redirect_uri="${REDIRECT_RAW}")"
 
-          STATUS="$(echo "$RESP" | jq -r '.status // empty')"
+          STATUS="$(printf '%s' "$RESP" | jq -r '.status // empty' 2>/dev/null || echo "")"
           if [ "$STATUS" != "0" ]; then
             {
               echo "## Exchange Failed"
               echo
-              echo "- Redirect used for exchange: ${REDIRECT_RAW}"
-              echo "- Client ID used: ${CLIENT_ID}"
-              echo "- Code length: ${#CODE}"
-              echo
-              echo "- Common causes: redirect mismatch, reused/expired code, or client secret/env mismatch."
+              echo "Redirect: ${REDIRECT_RAW}"
+              echo "Client ID: ${CLIENT_ID}"
+              echo "Code length: ${#CODE}"
               echo
               echo "Raw response:"
-              echo "$RESP" | jq . 2>/dev/null || echo "$RESP"
+              printf '%s\n' "$RESP" | jq . 2>/dev/null || printf '%s\n' "$RESP"
+              echo
+              echo "Hints:"
+              echo "- Codes are single-use and expire quickly; authorise then exchange immediately."
+              echo "- Client secret/env mismatch will make a fresh code look invalid."
+              echo "- Redirect must match the app exactly, including trailing slash."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-          REFRESH="$(echo "$RESP" | jq -r '.body.refresh_token')"
-          ACCESS="$(echo "$RESP" | jq -r '.body.access_token')"
-          EXPIRES="$(echo "$RESP" | jq -r '.body.expires_in')"
+          REFRESH="$(printf '%s' "$RESP" | jq -r '.body.refresh_token // empty')"
+          EXPIRES="$(printf '%s' "$RESP" | jq -r '.body.expires_in // empty')"
 
           {
             echo "## ✅ Success - Save Your Refresh Token"
@@ -141,5 +136,5 @@ jobs:
             echo
             echo "$REFRESH"
             echo
-            echo "Access token (preview): ${ACCESS:0:12}... (expires in ${EXPIRES}s)"
+            echo "Access token TTL (s): ${EXPIRES}"
           } >> "$GITHUB_STEP_SUMMARY"
