@@ -1,7 +1,7 @@
 {
-  "date": "2025-08-19",
-  "weight_kg": "91.15",
-  "body_fat_pct": "28.30",
+  "date": "2025-08-11",
+  "weight_kg": null,
+  "body_fat_pct": null,
   "muscle_mass_kg": null,
   "water_pct": null,
   "steps": null,
@@ -10,6 +10,6 @@
   "resting_hr_bpm": null,
   "calories_out": null,
   "source": "withings",
-  "is_partial_weight": false,
+  "is_partial_weight": true,
   "is_partial_activity": true
 }
