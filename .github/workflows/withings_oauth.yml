@@ -42,11 +42,7 @@ jobs:
           fi
 
           # URL-encode redirect
-          REDIRECT_ENC="$(python3 - <<'PY'
-import urllib.parse, sys
-print(urllib.parse.quote(sys.argv[1], safe=""))
-PY
-"$REDIRECT_RAW")"
+          REDIRECT_ENC="$(python3 - <<'PY'import urllib.parse, sys print(urllib.parse.quote(sys.argv[1], safe="")) PY "$REDIRECT_RAW")"
 
           # Expose to next step
           {
