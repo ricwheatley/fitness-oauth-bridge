@@ -1,0 +1,14 @@
+{
+  "status_code": 200,
+  "body": {
+    "status": 0,
+    "body": {
+      "userid": 1247995,
+      "access_token": "f7c862f0663a2df2e12b8a324a624f3f0600b16e",
+      "refresh_token": "fc637e73d79e33868a2c36288902658051d7d464",
+      "scope": "user.metrics,user.activity",
+      "expires_in": 10800,
+      "token_type": "Bearer"
+    }
+  }
+}
