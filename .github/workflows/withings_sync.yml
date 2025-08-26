@@ -1,8 +1,8 @@
-name: Withings Daily Sync (window rewrite)
+name: Withings Daily Sync (window rewrite, Pete E)
 
 on:
   schedule:
-    - cron: "17 5 * * *"   # daily 05:17 UTC
+    - cron: "45 3 * * *"   # daily 05:17 UTC
   workflow_dispatch:
 
 permissions:
@@ -27,10 +27,13 @@ jobs:
 
       - name: Pull 45d window, upsert CSVs, rewrite JSON history
         env:
-          WITHINGS_CLIENT_ID:     ${{ secrets.WITHINGS_CLIENT_ID }}
+          # Pete E app config
+          WITHINGS_CLIENT_ID:     ${{ vars.WITHINGS_CLIENT_ID }}
           WITHINGS_CLIENT_SECRET: ${{ secrets.WITHINGS_CLIENT_SECRET }}
-          WITHINGS_REDIRECT_URI:  ${{ secrets.WITHINGS_REDIRECT_URI }}
+          WITHINGS_REDIRECT_URI:  ${{ vars.WITHINGS_REDIRECT_URI }}
+          # Long-lived refresh token
           WITHINGS_REFRESH_TOKEN: ${{ secrets.WITHINGS_REFRESH_TOKEN }}
+          # Behaviour
           WINDOW_DAYS: "45"
           WEIGHT_CSV: knowledge/weight_log.csv
           ACTIVITY_CSV: knowledge/activity_log.csv
@@ -60,9 +63,10 @@ jobs:
           weight_csv = os.environ.get("WEIGHT_CSV","knowledge/weight_log.csv")
           act_csv    = os.environ.get("ACTIVITY_CSV","knowledge/activity_log.csv")
 
-          # --- token refresh
+          # --- token refresh (Pete E)
           resp = requests.post(TOKEN_URL, data={
-              "action":"requesttoken","grant_type":"refresh_token",
+              "action":"requesttoken",
+              "grant_type":"refresh_token",
               "client_id":os.environ["WITHINGS_CLIENT_ID"],
               "client_secret":os.environ["WITHINGS_CLIENT_SECRET"],
               "refresh_token":os.environ["WITHINGS_REFRESH_TOKEN"]
@@ -72,7 +76,7 @@ jobs:
           access = resp["body"]["access_token"]
           hdr = {"Authorization": f"Bearer {access}"}
 
-          # --- fetch weights (covers weight, fat%, muscle, water)
+          # --- fetch weights (weight, fat%, muscle, water)
           r = requests.get(MEASURE_URL, headers=hdr, params={
               "action":"getmeas",
               "meastypes":"1,6,76,77",
@@ -152,7 +156,6 @@ jobs:
                       "notes": ""
                   }
               else:
-                  # write a blank line for that date in window to make backfill obvious later
                   new_w[d] = {
                       "date": d, "weight_kg":"", "body_fat_pct":"", "muscle_mass_kg":"",
                       "water_pct":"", "source":"withings", "notes":""
@@ -212,11 +215,9 @@ jobs:
                   "resting_hr_bpm": a.get("resting_hr_bpm") or None,
                   "calories_out": a.get("calories_out") or None,
                   "source": "withings",
-                  # simple flags to spot partials
                   "is_partial_weight": not bool(w.get("weight_kg")),
                   "is_partial_activity": not bool(a.get("steps"))
               }
-              # write per-day JSON (overwrite every run)
               Path(f"docs/days/{d}.json").write_text(json.dumps(day, ensure_ascii=False, indent=2), encoding="utf-8")
               history.append(day)
 
