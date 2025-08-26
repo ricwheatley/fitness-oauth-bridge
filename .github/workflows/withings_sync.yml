@@ -1,8 +1,8 @@
-name: Withings Daily Sync (window rewrite, Pete E)
+name: Withings Daily Sync (window rewrite, raw capture)
 
 on:
   schedule:
-    - cron: "45 3 * * *"   # daily 05:17 UTC
+    - cron: "17 5 * * *"   # daily 05:17 UTC
   workflow_dispatch:
 
 permissions:
@@ -25,7 +25,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Pull 45d window, upsert CSVs, rewrite JSON history
+      - name: Pull 45d window, capture RAW JSON, upsert CSVs, rewrite JSON history
         env:
           # Pete E app config
           WITHINGS_CLIENT_ID:     ${{ vars.WITHINGS_CLIENT_ID }}
@@ -63,30 +63,54 @@ jobs:
           weight_csv = os.environ.get("WEIGHT_CSV","knowledge/weight_log.csv")
           act_csv    = os.environ.get("ACTIVITY_CSV","knowledge/activity_log.csv")
 
-          # --- token refresh (Pete E)
-          resp = requests.post(TOKEN_URL, data={
+          # where to save raw json
+          raw_dir = Path("docs/raw"); raw_dir.mkdir(parents=True, exist_ok=True)
+
+          # --- token refresh (capture RAW)
+          tok_resp = requests.post(TOKEN_URL, data={
               "action":"requesttoken",
               "grant_type":"refresh_token",
               "client_id":os.environ["WITHINGS_CLIENT_ID"],
               "client_secret":os.environ["WITHINGS_CLIENT_SECRET"],
               "refresh_token":os.environ["WITHINGS_REFRESH_TOKEN"]
-          }, timeout=45).json()
-          if resp.get("status") != 0:
-              print("Token refresh failed:", resp); sys.exit(1)
-          access = resp["body"]["access_token"]
+          }, timeout=45)
+
+          # save raw token response
+          try:
+              tok_json = tok_resp.json()
+          except Exception:
+              tok_json = {"non_json": tok_resp.text}
+          (raw_dir / "withings_token.json").write_text(
+              json.dumps({"status_code": tok_resp.status_code, "body": tok_json}, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+
+          if tok_json.get("status") != 0:
+              print("Token refresh failed:", tok_json); sys.exit(1)
+          access = tok_json["body"]["access_token"]
           hdr = {"Authorization": f"Bearer {access}"}
 
-          # --- fetch weights (weight, fat%, muscle, water)
-          r = requests.get(MEASURE_URL, headers=hdr, params={
+          # --- fetch weights (RAW capture + parse)
+          meas_resp = requests.get(MEASURE_URL, headers=hdr, params={
               "action":"getmeas",
-              "meastypes":"1,6,76,77",
+              "meastypes":"1,6,76,77",  # weight, fat_ratio, muscle_mass, hydration
               "category":1,
               "startdate":ts_midnight_utc(start),
               "enddate":ts_midnight_utc(today_utc)+86399
-          }, timeout=45).json()
+          }, timeout=45)
+
+          try:
+              meas_json = meas_resp.json()
+          except Exception:
+              meas_json = {"non_json": meas_resp.text}
+
+          (raw_dir / "withings_measures.json").write_text(
+              json.dumps(meas_json, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+
           weights_by_day = {}
-          if r.get("status") == 0:
-              for g in r.get("body",{}).get("measuregrps",[]):
+          if meas_json.get("status") == 0:
+              for g in meas_json.get("body",{}).get("measuregrps",[]):
                   d = datetime.fromtimestamp(g["date"], tz=timezone.utc).date()
                   measures = g.get("measures",[])
                   def val(t):
@@ -101,16 +125,27 @@ jobs:
                       "water_pct": f"{val(77):.2f}" if val(77) is not None else None,
                   }
 
-          # --- fetch activity (explicit fields)
-          r = requests.get(ACT_URL, headers=hdr, params={
+          # --- fetch activity (RAW capture + parse)
+          act_resp = requests.get(ACT_URL, headers=hdr, params={
               "action":"getactivity",
               "startdateymd": ymd(start),
               "enddateymd": ymd(today_utc),
+              # Ask explicitly for fields; if Withings ignores, RAW file will show what's actually returned
               "data_fields":"steps,calories,active_minutes,hr_average,hr_min"
-          }, timeout=45).json()
+          }, timeout=45)
+
+          try:
+              act_json = act_resp.json()
+          except Exception:
+              act_json = {"non_json": act_resp.text}
+
+          (raw_dir / "withings_activity.json").write_text(
+              json.dumps(act_json, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+
           acts_by_day = {}
-          if r.get("status") == 0:
-              for a in r.get("body",{}).get("activities",[]) or []:
+          if act_json.get("status") == 0:
+              for a in act_json.get("body",{}).get("activities",[]) or []:
                   d = a.get("date")
                   if not d: continue
                   acts_by_day[d] = {
@@ -127,7 +162,6 @@ jobs:
           ensure_csv(weight_csv, w_hdr)
           ensure_csv(act_csv, a_hdr)
 
-          # read existing (to preserve outside window if present)
           def read_csv(path):
               try:
                   with open(path, "r", newline="", encoding="utf-8") as f:
@@ -137,10 +171,8 @@ jobs:
           existing_w = {row["date"]: row for row in read_csv(weight_csv)}
           existing_a = {row["date"]: row for row in read_csv(act_csv)}
 
-          # rebuild maps for window dates
           window_dates = [ymd(start + timedelta(days=i)) for i in range(days)]
-          new_w = {}
-          new_a = {}
+          new_w, new_a = {}, {}
 
           for d in window_dates:
               w = weights_by_day.get(d)
@@ -152,8 +184,7 @@ jobs:
                       "body_fat_pct": w.get("body_fat_pct") or "",
                       "muscle_mass_kg": w.get("muscle_mass_kg") or "",
                       "water_pct": w.get("water_pct") or "",
-                      "source": "withings",
-                      "notes": ""
+                      "source": "withings", "notes": ""
                   }
               else:
                   new_w[d] = {
@@ -180,13 +211,11 @@ jobs:
                       "calories_out":"", "workout_type":"", "workout_duration_min":"", "source":"withings"
                   }
 
-          # merge with any rows outside window
           for d,row in existing_w.items():
               if d not in new_w: new_w[d] = row
           for d,row in existing_a.items():
               if d not in new_a: new_a[d] = row
 
-          # write CSVs sorted by date
           def write_csv(path, header, rows_map):
               rows = [rows_map[d] for d in sorted(rows_map.keys())]
               with open(path,"w",newline="",encoding="utf-8") as f:
@@ -221,25 +250,23 @@ jobs:
               Path(f"docs/days/{d}.json").write_text(json.dumps(day, ensure_ascii=False, indent=2), encoding="utf-8")
               history.append(day)
 
-          # latest day with any signal for daily.json
           latest = next((d for d in history if any([
               d["weight_kg"], d["steps"], d["calories_out"], d["avg_hr_bpm"]
           ])), history[0] if history else {"date": ymd(today_utc)})
 
-          # write indexes
           Path("docs/history.json").write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
           Path("docs/daily.json").write_text(json.dumps(latest, ensure_ascii=False, indent=2), encoding="utf-8")
 
           print(json.dumps({"daily": latest["date"], "days_emitted": len(history)}))
           PY
 
-      - name: Commit CSV and JSON updates
+      - name: Commit CSV and JSON updates (includes RAW)
         run: |
           if [[ -n "$(git status --porcelain knowledge/*.csv docs 2>/dev/null || true)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add knowledge/*.csv docs
-            git commit -m "chore: rewrite 45d JSON history and update CSVs"
+            git commit -m "chore: capture RAW Withings JSON, rewrite 45d history, update CSVs"
             git push
           else
             echo "No changes to commit."
