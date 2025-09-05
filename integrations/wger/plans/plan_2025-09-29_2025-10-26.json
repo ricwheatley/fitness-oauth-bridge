@@ -1,0 +1,351 @@
+{
+  "routine": {
+    "name": "PeteE Block 2025-09-29–2025-10-26",
+    "start": "2025-09-29",
+    "end": "2025-10-26",
+    "fit_in_week": true,
+    "description": "4-week Lower/Upper + Blaze plan generated automatically"
+  },
+  "days": [
+    {
+      "order": 1,
+      "name": "Lower",
+      "type": "custom",
+      "is_rest": false,
+      "need_logs_to_advance": true,
+      "description": "Weights — Lower body",
+      "exercises": [
+        {
+          "exercise_id": 43,
+          "name": "Barbell Squat",
+          "sets": 4,
+          "reps": "5",
+          "rir": 2,
+          "rest_s": 180,
+          "superset_id": null,
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": 507,
+          "name": "Romanian Deadlift",
+          "sets": 3,
+          "reps": "8",
+          "rir": 2,
+          "rest_s": 150,
+          "superset_id": null,
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": 371,
+          "name": "Leg Press",
+          "sets": 3,
+          "reps": "10",
+          "rir": 1,
+          "rest_s": 120,
+          "superset_id": null,
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": 1344,
+          "name": "Standing Calf Raise",
+          "sets": 3,
+          "reps": "12",
+          "rir": 1,
+          "rest_s": 90,
+          "superset_id": "A",
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": null,
+          "name": "Hanging Knee Raise",
+          "sets": 3,
+          "reps": "12",
+          "rir": 1,
+          "rest_s": 60,
+          "superset_id": "A",
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "order": 2,
+      "name": "Blaze",
+      "type": "hiit",
+      "is_rest": false,
+      "need_logs_to_advance": true,
+      "description": "Blaze HIIT @ 07:00 (45 min).",
+      "exercises": []
+    },
+    {
+      "order": 3,
+      "name": "Upper",
+      "type": "custom",
+      "is_rest": false,
+      "need_logs_to_advance": true,
+      "description": "Weights — Upper body",
+      "exercises": [
+        {
+          "exercise_id": 185,
+          "name": "Barbell Bench Press",
+          "sets": 4,
+          "reps": "5",
+          "rir": 2,
+          "rest_s": 180,
+          "superset_id": null,
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": null,
+          "name": "Barbell Bent-Over Row",
+          "sets": 3,
+          "reps": "8",
+          "rir": 2,
+          "rest_s": 150,
+          "superset_id": null,
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": null,
+          "name": "Barbell Overhead Press",
+          "sets": 3,
+          "reps": "6",
+          "rir": 2,
+          "rest_s": 150,
+          "superset_id": null,
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": 1470,
+          "name": "Lat Pulldown",
+          "sets": 3,
+          "reps": "10",
+          "rir": 1,
+          "rest_s": 90,
+          "superset_id": "B",
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": 1117,
+          "name": "Seated Cable Row",
+          "sets": 3,
+          "reps": "10",
+          "rir": 1,
+          "rest_s": 90,
+          "superset_id": "B",
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "exercise_id": 222,
+          "name": "Face Pull",
+          "sets": 3,
+          "reps": "12",
+          "rir": 1,
+          "rest_s": 60,
+          "superset_id": null,
+          "progression": {
+            "weight": {
+              "each_iteration_percent": 2.5,
+              "iterations": [
+                2,
+                3,
+                4
+              ],
+              "requirements": {
+                "rules": [
+                  "weight",
+                  "repetitions"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "order": 4,
+      "name": "Blaze",
+      "type": "hiit",
+      "is_rest": false,
+      "need_logs_to_advance": true,
+      "description": "Blaze HIIT @ 06:15 (45 min).",
+      "exercises": []
+    },
+    {
+      "order": 5,
+      "name": "Mobility & Steps",
+      "type": "custom",
+      "is_rest": true,
+      "need_logs_to_advance": false,
+      "description": "Active recovery, mobility and 10k steps.",
+      "exercises": []
+    },
+    {
+      "order": 6,
+      "name": "Blaze",
+      "type": "hiit",
+      "is_rest": false,
+      "need_logs_to_advance": true,
+      "description": "Blaze HIIT @ 08:00 (45 min).",
+      "exercises": []
+    },
+    {
+      "order": 7,
+      "name": "Rest / Optional Blaze",
+      "type": "hiit",
+      "is_rest": true,
+      "need_logs_to_advance": false,
+      "description": "Optional Blaze @ 09:05; otherwise rest + mobility.",
+      "exercises": []
+    }
+  ]
+}
